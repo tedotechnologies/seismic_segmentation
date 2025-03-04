@@ -99,8 +99,8 @@ class SeismicDataset:
                 seismic_img = seismic
             
             # Приводим изображение и маску к размеру 224x224
-            seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
-            label = cv2.resize(label, self.target_size, interpolation=cv2.INTER_NEAREST)
+            # seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
+            # label = cv2.resize(label, self.target_size, interpolation=cv2.INTER_NEAREST)
             
             # Генерация точечного промпта из текущей маски
             point_prompt = generate_point_prompt(label)
@@ -128,8 +128,8 @@ class SeismicDataset:
             seismic_img = np.stack([seismic_slice] * 3, axis=-1)
             
             # Приводим срез и маску к размеру 224x224
-            seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
-            label_slice = cv2.resize(label_slice, self.target_size, interpolation=cv2.INTER_NEAREST)
+            # seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
+            # label_slice = cv2.resize(label_slice, self.target_size, interpolation=cv2.INTER_NEAREST)
             
             # Генерация точечного промпта для выбранного среза
             point_prompt = generate_point_prompt(label_slice)
