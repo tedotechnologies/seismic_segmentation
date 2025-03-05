@@ -3,6 +3,10 @@ import numpy as np
 import cv2
 import random
 
+from PIL import Image
+import torch
+from torch.utils.data import Dataset
+
 try:
     import albumentations as A
 except ImportError:
@@ -17,7 +21,7 @@ def load_cube(filepath, shape=(256, 256, 256), dtype=np.float32):
     if data.size != np.prod(shape):
         raise ValueError(
             f"Размер данных {data.size} не совпадает с ожидаемой формой {shape} для файла {filepath}"
-            )
+        )
     return data.reshape(shape)
 
 def generate_point_prompt(mask):
@@ -35,9 +39,7 @@ def apply_augmentations(sample, aug_pipeline):
     Аугментация применяется к "seismic_img" и "label". 
     Если в сэмпле присутствует "mask_prompt", то и к нему тоже.
     """
-    # Собираем словарь для аугментаций
     data = {"image": sample["seismic_img"], "mask": sample["label"]}
-    # Если есть дополнительная маска-промпт, добавляем её (albumentations поддерживает несколько масок)
     if sample.get("mask_prompt") is not None:
         data["mask2"] = sample["mask_prompt"]
 
@@ -49,7 +51,7 @@ def apply_augmentations(sample, aug_pipeline):
 
     return sample
 
-# Универсальный датасет для сейсмических данных
+# Основной датасет для сейсмических данных
 class SeismicDataset:
     def __init__(self, config):
         """
@@ -68,12 +70,11 @@ class SeismicDataset:
         self.data_type = config["type"]
         self.seismic_dir = config["seismic_dir"]
         self.label_dir = config["label_dir"]
-        self.shape = config.get("shape", (224, 224))  # Исходная форма данных
+        self.shape = config.get("shape", (224, 224))
         self.mask_dtype = config.get("mask_dtype", np.uint8)
-        self.num_slices = config.get("num_slices", 1)  # используется для 3D
+        self.num_slices = config.get("num_slices", 1)
         self.neighbor_offset = config.get("neighbor_offset", 1)
         self.files = sorted(os.listdir(self.seismic_dir))
-        # Целевая форма для унификации изображений и масок
         self.target_size = (224, 224)
         self.augmentation_pipeline = config.get("augmentation_pipeline", None)
     
@@ -88,21 +89,14 @@ class SeismicDataset:
         sample = {"filename": filename}
         
         if self.data_type == "2D":
-            # Загрузка 2D снимка и маски
             seismic = load_dat_file(seismic_path, shape=self.shape)
             label = load_dat_file(label_path, shape=self.shape).astype(self.mask_dtype)
             
-            # Если сейсмика одноканальная, дублируем канал для создания 3-канального изображения
             if seismic.ndim == 2:
                 seismic_img = np.stack([seismic] * 3, axis=-1)
             else:
                 seismic_img = seismic
             
-            # Приводим изображение и маску к размеру 224x224
-            # seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
-            # label = cv2.resize(label, self.target_size, interpolation=cv2.INTER_NEAREST)
-            
-            # Генерация точечного промпта из текущей маски
             point_prompt = generate_point_prompt(label)
             mask_prompt = None
             
@@ -114,27 +108,17 @@ class SeismicDataset:
             })
         
         elif self.data_type in ["3D", "3D_variant"]:
-            # Загрузка 3D-куба сейсмики и меток
             seismic_cube = load_cube(seismic_path, shape=self.shape, dtype=np.float32)
             label_cube = load_cube(label_path, shape=self.shape, dtype=self.mask_dtype)
             depth = seismic_cube.shape[0]
             
-            # Выбираем случайный срез
             slice_idx = random.choice(range(depth))
             seismic_slice = seismic_cube[slice_idx, :, :]
             label_slice = label_cube[slice_idx, :, :]
             
-            # Создаём 3-канальное изображение из среза
             seismic_img = np.stack([seismic_slice] * 3, axis=-1)
-            
-            # Приводим срез и маску к размеру 224x224
-            # seismic_img = cv2.resize(seismic_img, self.target_size, interpolation=cv2.INTER_LINEAR)
-            # label_slice = cv2.resize(label_slice, self.target_size, interpolation=cv2.INTER_NEAREST)
-            
-            # Генерация точечного промпта для выбранного среза
             point_prompt = generate_point_prompt(label_slice)
             
-            # Генерация маски-промпта: выбираем соседний срез с учетом neighbor_offset
             neighbor_idx = slice_idx + self.neighbor_offset
             if neighbor_idx < depth:
                 mask_prompt = label_cube[neighbor_idx, :, :]
@@ -150,13 +134,11 @@ class SeismicDataset:
                 "slice_idx": slice_idx
             })
         
-        # Применение аугментаций, если они заданы в конфигурации
         if self.augmentation_pipeline is not None:
             sample = apply_augmentations(sample, self.augmentation_pipeline)
         
         return sample
 
-# Функция для объединения нескольких источников данных
 def create_combined_dataset(configs):
     """
     Принимает список конфигураций, создаёт датасет для каждой и объединяет данные.
@@ -169,7 +151,64 @@ def create_combined_dataset(configs):
             combined_samples.append(dataset[i])
     return combined_samples
 
-# Пример конфигураций для разных источников
+def to_pil_image(np_img):
+    """
+    Преобразует numpy-массив в PIL Image.
+    Если данные не uint8, выполняется нормализация в диапазоне [0, 255].
+    """
+    if np_img.dtype != np.uint8:
+        if np_img.max() != np_img.min():
+            np_img = (255 * (np_img - np_img.min()) / (np_img.max() - np_img.min())).astype(np.uint8)
+        else:
+            np_img = np_img.astype(np.uint8)
+    return Image.fromarray(np_img)
+
+class SegmentationDataset(Dataset):
+    """
+    Датасет для обучения сегментации.
+    Принимает конфигурационный словарь с параметрами:
+        "type"        - тип данных ("2D", "3D" и т.п., сейчас используется "2D")
+        "seismic_dir" - директория с сейсмическими данными;
+        "label_dir"   - директория с метками;
+        "shape"       - ожидаемая форма для загрузки данных;
+        "mask_dtype"  - тип данных для меток;
+        "use_pil"     - если True, возвращает изображение в формате PIL, иначе numpy-массив.
+    При инициализации автоматически формируется список файлов из seismic_dir.
+    """
+    def __init__(self, cfg):
+        self.data_type = cfg.get("type", "2D")
+        self.seismic_dir = cfg["seismic_dir"]
+        self.label_dir = cfg["label_dir"]
+        self.shape = cfg.get("shape", (224, 224))
+        self.mask_dtype = cfg.get("mask_dtype", 0)
+        self.use_pil = cfg.get("use_pil", True)
+        self.file_list = sorted(os.listdir(self.seismic_dir))
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        filename = self.file_list[idx]
+        seismic_path = os.path.join(self.seismic_dir, filename)
+        label_path   = os.path.join(self.label_dir, filename)
+        
+        seismic = load_dat_file(seismic_path, shape=self.shape)
+        label   = load_dat_file(label_path, shape=self.shape)
+        
+        if seismic.ndim == 2:
+            seismic_img = np.stack([seismic, seismic, seismic], axis=-1)
+        else:
+            seismic_img = seismic
+        
+        if self.use_pil:
+            pil_image = to_pil_image(seismic_img).convert("RGB")
+            return filename, pil_image, label
+        else:
+            return filename, seismic_img, label
+
+def custom_collate(batch):
+    return batch
+
 if __name__ == "__main__":
     # Пример аугментационной пайплайна через Albumentations
     if A is not None:
