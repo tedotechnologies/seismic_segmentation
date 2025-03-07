@@ -3,7 +3,7 @@
 SCRIPT_PATH="/home/dmatveev/workdir/rosneft_segmentation/experiments/train.py"
 
 PROJECT_NAME="Rosneft segmentation"
-TASK_NAME="Experiment 4"
+TASK_NAME="Experiment 5, one channel"
 EPOCHS=1
 BATCH_SIZE=4
 LR=1e-4

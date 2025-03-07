@@ -11,10 +11,17 @@ from peft import get_peft_model, LoraConfig, TaskType
 from transformers import SamModel, SamProcessor
 from clearml import Task
 
-from prepare_data import SeismicDataset
+from prepare_data import SegmentationDataset
+
+def custom_collate(batch):
+    return {
+        "filename": [item[0] for item in batch],
+        "seismic_img": [item[1] for item in batch],
+        "label": [item[2] for item in batch]
+    }
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train SAM model with ClearML")
+    parser = argparse.ArgumentParser(description="Train SAM model with ClearML (batch inference using prompt points)")
     parser.add_argument("--project_name", type=str, default="SAM Fine Tuning")
     parser.add_argument("--task_name", type=str, default="LoRA Training")
     parser.add_argument("--epochs", type=int, default=2)
@@ -24,6 +31,7 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    # Set ClearML environment variables
     os.environ["CLEARML_WEB_HOST"] = "https://app.clear.ml/"
     os.environ["CLEARML_API_HOST"] = "https://api.clear.ml"
     os.environ["CLEARML_FILES_HOST"] = "https://files.clear.ml"
@@ -37,8 +45,8 @@ def main():
             "pretrained": "facebook/sam-vit-huge", 
             "use_lora": True,
             "lora_config": { 
-                "r": 32,
-                "lora_alpha": 64,
+                "r": 32,  # adjusted to match notebook
+                "lora_alpha": 32,
                 "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
                 "lora_dropout": 0.1,
                 "bias": "none",
@@ -59,7 +67,7 @@ def main():
             "seismic_dir": "/home/dmatveev/workdir/rosneft_segmentation/data/Salt2d/seismic",
             "label_dir": "/home/dmatveev/workdir/rosneft_segmentation/data/Salt2d/label",
             "shape": (224, 224),
-            "mask_dtype": np.uint8
+            "mask_dtype": np.uint8  # include mask dtype as in notebook
         },
         "clearml": {
             "project_name": args.project_name,
@@ -95,17 +103,21 @@ def main():
     print("Trainable parameters:", sum(p.numel() for p in model.parameters() if p.requires_grad))
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_config["training"]["lr"])
 
-    data_config = {
-        "seismic_dir": train_config["data"]["seismic_dir"],
-        "label_dir": train_config["data"]["label_dir"],
-        "shape": train_config["data"]["shape"],
-    }
-    seismic_dataset = SeismicDataset(data_config)
-    torch_dataset = TorchSeismicDataset(seismic_dataset)
-    train_loader = DataLoader(torch_dataset,
+    data_cfg = train_config["data"]
+    dataset = SegmentationDataset({
+        "type": data_cfg.get("type", "2D"),
+        "seismic_dir": data_cfg["seismic_dir"],
+        "label_dir": data_cfg["label_dir"],
+        "shape": data_cfg["shape"],
+        "mask_dtype": data_cfg.get("mask_dtype", 0),
+        "use_pil": True
+    })
+
+    train_loader = DataLoader(dataset,
                               batch_size=train_config["training"]["batch_size"],
                               shuffle=True,
-                              num_workers=train_config["training"]["num_workers"])
+                              num_workers=train_config["training"]["num_workers"],
+                              collate_fn=custom_collate)
 
     num_epochs = train_config["training"]["epochs"]
     log_interval = train_config["training"]["log_interval"]
@@ -117,49 +129,46 @@ def main():
 
         for batch_idx, batch in enumerate(pbar):
             optimizer.zero_grad()
-            seismic_imgs = batch["seismic_img"].to(device)
-            labels = batch["label"].to(device)
 
-            inputs = processor(list(seismic_imgs), return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            image_embeddings = model.get_image_embeddings(inputs["pixel_values"])
+            labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
 
-            batch_prompts = []
+            batch_input_points = []
             for label in labels.cpu().numpy():
                 h, w = label.shape
-                nonzero_indices = np.argwhere(label != 0)
+                nonzero_indices = np.argwhere(label == 1)
                 if len(nonzero_indices) > 0:
                     idx = random.randint(0, len(nonzero_indices) - 1)
                     y, x = nonzero_indices[idx]
                     prompt_point = [[x, y]]
                 else:
                     prompt_point = [[w / 2.0, h / 2.0]]
-                batch_prompts.append(prompt_point)
+                batch_input_points.append(prompt_point)
 
-            prompt_inputs = processor(list(seismic_imgs), input_points=batch_prompts, return_tensors="pt")
-            prompt_inputs = {k: v.to(device) for k, v in prompt_inputs.items()}
-            prompt_inputs.pop("pixel_values", None)
-            prompt_inputs.update({"image_embeddings": image_embeddings})
+            inputs = processor(batch["seismic_img"], input_points=batch_input_points, return_tensors="pt")
+            original_sizes = inputs["original_sizes"]
+            reshaped_input_sizes = inputs["reshaped_input_sizes"]
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
-            outputs = model(**prompt_inputs)
-            pred_masks = outputs.pred_masks
+            outputs = model(**inputs)
 
-            if pred_masks.ndim == 5:
-                pred_logits, _ = pred_masks.max(dim=2)  # [B, 1, H, W]
-                pred_logits = pred_logits.squeeze(1)
-            elif pred_masks.ndim == 4:
-                pred_logits, _ = pred_masks.max(dim=1)  # [B, H, W]
-            elif pred_masks.ndim == 3:
-                pred_logits, _ = pred_masks.max(dim=0)  # [H, W]
-                pred_logits = pred_logits.unsqueeze(0)  # [1, H, W]
-            else:
-                raise ValueError(f"Unexpected pred_masks shape: {pred_masks.shape}")
+            pred_logits = outputs.pred_masks[:, 0, 1, :, :]  # [B, H, W]
 
             if pred_logits.shape[-2:] != labels.shape[-2:]:
-                pred_logits = F.interpolate(pred_logits.unsqueeze(1),
-                                            size=labels.shape[-2:],
-                                            mode="bilinear",
-                                            align_corners=False).squeeze(1)
+                # Шаг 1. Интерполируем до размера паддинга (целевого размера, к которому приводятся изображения)
+                pad_size = train_config["data"].get("pad_size", {"height": 1024, "width": 1024})
+                target_image_size = (pad_size["height"], pad_size["width"])
+                pred_logits = F.interpolate(pred_logits.unsqueeze(1), size=target_image_size, mode="bilinear", align_corners=False).squeeze(1)
+                
+                # Шаг 2. Для каждого изображения из батча:
+                pred_logits_list = []
+                for i, rs in enumerate(reshaped_input_sizes):  # reshaped_input_sizes получаем из processor
+                    # Обрезаем до размеров, на которые было изменено изображение перед паддингом
+                    cropped = pred_logits[i, :rs[0], :rs[1]]
+                    # Шаг 3. Интерполируем до оригинального размера меток
+                    orig_size = labels[i].shape  # например, (224, 224)
+                    upsampled = F.interpolate(cropped.unsqueeze(0).unsqueeze(0), size=orig_size, mode="bilinear", align_corners=False).squeeze(0).squeeze(0)
+                    pred_logits_list.append(upsampled)
+                pred_logits = torch.stack(pred_logits_list, dim=0)
 
             loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
             loss.backward()
