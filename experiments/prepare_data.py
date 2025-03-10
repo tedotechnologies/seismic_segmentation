@@ -95,7 +95,9 @@ class SegmentationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.file_list)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(len(self)))]
         filename = self.file_list[idx]
         seismic_path = os.path.join(self.seismic_dir, filename)
         label_path = os.path.join(self.label_dir, filename)

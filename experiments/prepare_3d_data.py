@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 cube_shape = (256, 256, 256)
 amp_dtype = np.float32
-mask_dtype = np.uint32
+mask_dtype = np.uint8
 
 
 def load_cube_raw(filename, shape, dtype):
@@ -14,12 +14,13 @@ def load_cube_raw(filename, shape, dtype):
     return data.reshape(shape)
 
 
-noise_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/noise"
-karst_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/karst"
+noise_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/sabamrine/seismic3d"
+karst_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/sabamrine/label3d"
 
 
-seismic_out_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/seismic"
-label_out_dir   = "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/label"
+seismic_out_dir = "/home/dmatveev/workdir/rosneft_segmentation/data/sabamrine/seismic"
+label_out_dir   = "/home/dmatveev/workdir/rosneft_segmentation/data/sabamrine/label"
+
 os.makedirs(seismic_out_dir, exist_ok=True)
 os.makedirs(label_out_dir, exist_ok=True)
 
