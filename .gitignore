@@ -1,2 +1,7 @@
 /for_rosneft
 /data/*
+/outputs/
+/models/
+/__pycache__/
+*.pt
+*.ipynb
