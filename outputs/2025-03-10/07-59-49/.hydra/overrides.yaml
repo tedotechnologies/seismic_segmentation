@@ -1,7 +1,0 @@
-- clearml.project_name=Rosneft segmentation
-- clearml.task_name="Experiment 10| select best mask (channel), with centre point
-  | train on salt, test paleokarst"
-- training.epochs=1
-- training.batch_size=4
-- training.lr=1e-4
-- model.freeze_base=True
