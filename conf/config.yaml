@@ -1,0 +1,33 @@
+model:
+  pretrained: "facebook/sam-vit-huge"
+  use_lora: true
+  freeze_base: false
+  lora_config:
+    r: 32
+    lora_alpha: 32
+    target_modules: ["q_proj", "k_proj", "v_proj", "out_proj"]
+    lora_dropout: 0.1
+    bias: "none"
+    task_type: "FEATURE_EXTRACTION"
+
+training:
+  epochs: 2
+  batch_size: 4
+  lr: 1e-4
+  num_workers: 2
+  log_interval: 10
+  use_mask: true
+
+data:
+  type: "2D"
+  seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/Salt2d/seismic"
+  label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/Salt2d/label"
+  shape: [224, 224]
+  mask_dtype: "np.uint8" 
+  pad_size:
+    height: 1024
+    width: 1024
+
+clearml:
+  project_name: "Rosneft segmentation"
+  task_name: "Experiment 11| Try hydra"
