@@ -1,6 +1,5 @@
 import os
 import random
-import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -17,6 +16,7 @@ from prepare_data import create_combined_dataset
 
 import albumentations as A
 
+
 augmentation_pipeline = A.Compose([
     A.Resize(height=256, width=256, p=1.0),
     # A.HorizontalFlip(p=0.5),
@@ -32,7 +32,11 @@ def custom_collate(batch: list) -> dict:
     }
 
 
-def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5) -> tuple:
+def compute_metrics(
+        pred: np.ndarray,
+        target: np.ndarray,
+        threshold: float = 0.5
+        ) -> tuple:
     pred_bin = (pred > threshold).astype(np.uint8)
     target_bin = (target > threshold).astype(np.uint8)
     if pred_bin.sum() == 0 and target_bin.sum() == 0:
@@ -72,7 +76,12 @@ def generate_input_points_and_labels(label: np.ndarray) -> tuple:
         return [[0, 0]], [-1]   # dummy prompt and padding label
 
 
-def interpolate_prediction(pred_logits: torch.Tensor, original_sizes: list, pad_size: dict, labels: torch.Tensor) -> torch.Tensor:
+def interpolate_prediction(
+        pred_logits: torch.Tensor,
+        original_sizes: list,
+        pad_size: dict,
+        labels: torch.Tensor
+        ) -> torch.Tensor:
     target_image_size = (pad_size["height"], pad_size["width"])
     pred_logits = F.interpolate(pred_logits.unsqueeze(1), size=target_image_size, mode="bilinear", align_corners=False).squeeze(1)
     pred_logits_list = []
@@ -83,6 +92,7 @@ def interpolate_prediction(pred_logits: torch.Tensor, original_sizes: list, pad_
         pred_logits_list.append(upsampled.squeeze(0).squeeze(0))
     return torch.stack(pred_logits_list, dim=0)
 
+
 def parse_mask_dtype(dtype_str):
     if isinstance(dtype_str, str):
         if dtype_str == "np.uint8":
@@ -91,6 +101,7 @@ def parse_mask_dtype(dtype_str):
             return np.uint32
     return dtype_str
 
+
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
@@ -98,8 +109,8 @@ def main(cfg: DictConfig):
     os.environ["CLEARML_WEB_HOST"] = "https://app.clear.ml/"
     os.environ["CLEARML_API_HOST"] = "https://api.clear.ml"
     os.environ["CLEARML_FILES_HOST"] = "https://files.clear.ml"
-    os.environ["CLEARML_API_ACCESS_KEY"] = "VH2OIPC5NKDGRNFJ9LW5W2KSU3YP4T"
-    os.environ["CLEARML_API_SECRET_KEY"] = "Ixtz1NVs8wKDzNfyakkHIHHWN_Oy4vuzwbza8gu2za5SZpcl62e3s6v3s7uN9SzKbII"
+    os.environ["CLEARML_API_ACCESS_KEY"] = ""
+    os.environ["CLEARML_API_SECRET_KEY"] = ""
 
     task = Task.init(project_name=cfg.clearml.project_name,
                      task_name=cfg.clearml.task_name)

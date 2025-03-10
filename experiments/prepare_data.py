@@ -15,7 +15,10 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 
 
-def load_dat_file(filepath: str, shape=(224, 224)) -> np.ndarray:
+def load_dat_file(
+        filepath: str,
+        shape=(224, 224)
+        ) -> np.ndarray:
     data = np.fromfile(filepath, dtype=np.float32)
     return data.reshape(shape)
 
@@ -33,12 +36,14 @@ def load_cube(
         )
     return data.reshape(shape)
 
+
 def generate_point_prompt(mask: np.ndarray) -> np.ndarray:
     pos_indices = np.argwhere(mask > 0)
     if len(pos_indices) > 0:
         chosen_idx = random.choice(pos_indices)
         return np.array([chosen_idx[1], chosen_idx[0]], dtype=np.float32)
     return None
+
 
 def apply_augmentations(sample, aug_pipeline):
     """
@@ -58,6 +63,7 @@ def apply_augmentations(sample, aug_pipeline):
         sample["mask_prompt"] = augmented["mask2"]
 
     return sample
+
 
 def to_pil_image(np_img: np.ndarray) -> Image.Image:
     """
