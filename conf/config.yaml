@@ -11,13 +11,14 @@ model:
     task_type: "FEATURE_EXTRACTION"
 
 training:
-  epochs: 1
+  epochs: 2
   batch_size: 4
   lr: 1e-4
+  warmup_steps: 140
   num_workers: 2
   log_interval: 10
   use_mask: true
-  use_subset: true
+  use_subset: false
   size_of_subset: 10
   train_val_split: 0.8
 
@@ -39,12 +40,21 @@ train_data:
     pad_size:
       height: 1024
       width: 1024
+      
+  - type: "2D"
+    seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/seismic"
+    label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/paleokart/label"
+    shape: [256, 256]
+    mask_dtype: "np.uint8"
+    pad_size:
+      height: 1024
+      width: 1024
 
 test_data:
   type: "2D"
-  seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/2d_paleovres/seismic"
-  label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/2d_paleovres/label"
-  shape: [401, 401]
+  seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/seismic"
+  label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/label"
+  shape: [301, 301]
   mask_dtype: "np.uint8"
   pad_size:
     height: 1024
@@ -52,4 +62,4 @@ test_data:
 
 clearml:
   project_name: "Rosneft segmentation"
-  task_name: "Experiment 14| select best mask (channel), with centre point | train on Salt2d, sabamrine | test 2d_paleovres"
+  task_name: "Experiment 15| select best mask (channel), with centre point | train on Salt2d, sabamrine | test 2d_paleovres | 2 epoch, 140 steps warmup"

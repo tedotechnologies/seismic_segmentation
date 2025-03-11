@@ -3,13 +3,13 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split, Subset
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from peft import get_peft_model, LoraConfig, TaskType
-from transformers import SamModel, SamProcessor
+from transformers import SamModel, SamProcessor, get_linear_schedule_with_warmup
 from clearml import Task
 from prepare_data import SegmentationDataset, create_combined_dataset
 
@@ -31,7 +31,11 @@ def custom_collate(batch: list) -> dict:
     }
 
 
-def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5) -> tuple:
+def compute_metrics(
+        pred: np.ndarray,
+        target: np.ndarray,
+        threshold: float = 0.5
+        ) -> tuple:
     pred_bin = (pred > threshold).astype(np.uint8)
     target_bin = (target > threshold).astype(np.uint8)
     if pred_bin.sum() == 0 and target_bin.sum() == 0:
@@ -43,6 +47,7 @@ def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5
     target_sum = target_bin.sum()
     dice = (2.0 * intersection) / (pred_sum + target_sum) if (pred_sum + target_sum) != 0 else 0.0
     return iou, dice
+
 
 def select_best_mask(outputs) -> torch.Tensor:
     """
@@ -64,6 +69,7 @@ def select_best_mask(outputs) -> torch.Tensor:
         best_masks.append(pred_masks_candidates[i, best_idx, :, :])
     return torch.stack(best_masks, dim=0)  # (B, H, W)
 
+
 def generate_input_points_and_labels(label: np.ndarray) -> tuple:
     """
     Returns a tuple (points, labels) where points is a list with at least one 2D point,
@@ -79,11 +85,13 @@ def generate_input_points_and_labels(label: np.ndarray) -> tuple:
     else:
         return [[0, 0]], [-1]
 
+
 def interpolate_prediction(pred_logits: torch.Tensor,
                            original_sizes: list,
                            reshaped_input_sizes: list,
                            labels: torch.Tensor,
-                           pad_size: dict) -> torch.Tensor:
+                           pad_size: dict
+                           ) -> torch.Tensor:
     target_image_size = (pad_size["height"], pad_size["width"])
     # Add channel dimension and interpolate to pad_size
     pred_logits = pred_logits.unsqueeze(1)
@@ -99,6 +107,7 @@ def interpolate_prediction(pred_logits: torch.Tensor,
         pred_logits_list.append(upsampled.squeeze(0).squeeze(0))
     return torch.stack(pred_logits_list, dim=0)
 
+
 def parse_mask_dtype(dtype_str):
     if isinstance(dtype_str, str):
         if dtype_str == "np.uint8":
@@ -106,6 +115,7 @@ def parse_mask_dtype(dtype_str):
         elif dtype_str == "np.uint32":
             return np.uint32
     return dtype_str
+
 
 def prepare_inputs(batch: dict, processor, device: str) -> tuple:
     """
@@ -135,6 +145,7 @@ def prepare_inputs(batch: dict, processor, device: str) -> tuple:
     inputs = {k: v.to(device) for k, v in inputs.items()}
     return inputs, original_sizes, reshaped_input_sizes
 
+
 def postprocess_prediction(pred_logits: torch.Tensor,
                            labels: torch.Tensor,
                            original_sizes=None,
@@ -149,6 +160,7 @@ def postprocess_prediction(pred_logits: torch.Tensor,
                                         mode="bilinear", align_corners=False).squeeze(1)
     return pred_logits
 
+
 def compute_batch_metrics(pred_masks, labels) -> tuple:
     ious, dices = [], []
     labels_np = labels.cpu().numpy()
@@ -158,15 +170,26 @@ def compute_batch_metrics(pred_masks, labels) -> tuple:
         dices.append(dice)
     return ious, dices
 
-def train_one_epoch(model, train_loader, optimizer, processor, device, cfg, task):
+
+def train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        scheduler,
+        processor,
+        device,
+        cfg,
+        task
+        ):
+    
     model.train()
     epoch_loss = 0.0
     pbar = tqdm(train_loader, desc="Training", ncols=100)
     for batch_idx, batch in enumerate(pbar):
         optimizer.zero_grad()
-        # Prepare labels for loss computation
+
         labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
-        # Prepare inputs using the helper
+
         inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
         outputs = model(**inputs)
         pred_logits = select_best_mask(outputs)
@@ -175,16 +198,19 @@ def train_one_epoch(model, train_loader, optimizer, processor, device, cfg, task
         loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
         loss.backward()
         optimizer.step()
+        scheduler.step()  # Update the learning rate scheduler
         epoch_loss += loss.item()
 
         if batch_idx % cfg.training.log_interval == 0:
             current_iter = batch_idx  # Simplified iteration count here; adjust as needed.
-            print(f"Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}")
+            current_lr = optimizer.param_groups[0]["lr"]
+            print(f"Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}, LR: {current_lr:.6f}")
             task.get_logger().report_scalar("loss", "train", iteration=current_iter, value=loss.item())
     avg_loss = epoch_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
     task.get_logger().report_scalar("epoch_loss", "train", iteration=0, value=avg_loss)
     return avg_loss
+
 
 def validate(model, val_loader, processor, device, cfg, task):
     model.eval()
@@ -192,7 +218,7 @@ def validate(model, val_loader, processor, device, cfg, task):
     val_loss = 0.0
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation", ncols=100):
-            labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
+            labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
             inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
             outputs = model(**inputs, multimask_output=False)
             pred_logits = select_best_mask(outputs)
@@ -212,6 +238,7 @@ def validate(model, val_loader, processor, device, cfg, task):
     task.get_logger().report_scalar("val_iou", "val", iteration=0, value=avg_iou)
     task.get_logger().report_scalar("val_dice", "val", iteration=0, value=avg_dice)
     return avg_loss, avg_iou, avg_dice
+
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
@@ -292,9 +319,17 @@ def main(cfg: DictConfig):
         collate_fn=custom_collate
     )
 
+    # Calculate total training steps and create the learning rate scheduler with warmup
+    total_steps = cfg.training.epochs * len(train_loader)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=cfg.training.warmup_steps,
+        num_training_steps=total_steps
+    )
+
     for epoch in range(cfg.training.epochs):
         print(f"Epoch {epoch+1}/{cfg.training.epochs}")
-        train_loss = train_one_epoch(model, train_loader, optimizer, processor, device, cfg, task)
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, processor, device, cfg, task)
         val_loss, avg_iou, avg_dice = validate(model, val_loader, processor, device, cfg, task)
 
     print("Training complete.")
