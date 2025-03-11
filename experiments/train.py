@@ -31,11 +31,7 @@ def custom_collate(batch: list) -> dict:
     }
 
 
-def compute_metrics(
-        pred: np.ndarray,
-        target: np.ndarray,
-        threshold: float = 0.5
-        ) -> tuple:
+def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5) -> tuple:
     pred_bin = (pred > threshold).astype(np.uint8)
     target_bin = (target > threshold).astype(np.uint8)
     if pred_bin.sum() == 0 and target_bin.sum() == 0:
@@ -47,7 +43,6 @@ def compute_metrics(
     target_sum = target_bin.sum()
     dice = (2.0 * intersection) / (pred_sum + target_sum) if (pred_sum + target_sum) != 0 else 0.0
     return iou, dice
-
 
 def select_best_mask(outputs) -> torch.Tensor:
     """
@@ -69,7 +64,6 @@ def select_best_mask(outputs) -> torch.Tensor:
         best_masks.append(pred_masks_candidates[i, best_idx, :, :])
     return torch.stack(best_masks, dim=0)  # (B, H, W)
 
-
 def generate_input_points_and_labels(label: np.ndarray) -> tuple:
     """
     Returns a tuple (points, labels) where points is a list with at least one 2D point,
@@ -85,21 +79,15 @@ def generate_input_points_and_labels(label: np.ndarray) -> tuple:
     else:
         return [[0, 0]], [-1]
 
-
 def interpolate_prediction(pred_logits: torch.Tensor,
                            original_sizes: list,
                            reshaped_input_sizes: list,
                            labels: torch.Tensor,
                            pad_size: dict) -> torch.Tensor:
     target_image_size = (pad_size["height"], pad_size["width"])
-
+    # Add channel dimension and interpolate to pad_size
     pred_logits = pred_logits.unsqueeze(1)
-    pred_logits = F.interpolate(
-        pred_logits,
-        size=target_image_size,
-        mode="bilinear",
-        align_corners=False
-        )
+    pred_logits = F.interpolate(pred_logits, size=target_image_size, mode="bilinear", align_corners=False)
     pred_logits = pred_logits.squeeze(1)
     
     pred_logits_list = []
@@ -111,7 +99,6 @@ def interpolate_prediction(pred_logits: torch.Tensor,
         pred_logits_list.append(upsampled.squeeze(0).squeeze(0))
     return torch.stack(pred_logits_list, dim=0)
 
-
 def parse_mask_dtype(dtype_str):
     if isinstance(dtype_str, str):
         if dtype_str == "np.uint8":
@@ -119,7 +106,6 @@ def parse_mask_dtype(dtype_str):
         elif dtype_str == "np.uint32":
             return np.uint32
     return dtype_str
-
 
 def prepare_inputs(batch: dict, processor, device: str) -> tuple:
     """
@@ -149,7 +135,6 @@ def prepare_inputs(batch: dict, processor, device: str) -> tuple:
     inputs = {k: v.to(device) for k, v in inputs.items()}
     return inputs, original_sizes, reshaped_input_sizes
 
-
 def postprocess_prediction(pred_logits: torch.Tensor,
                            labels: torch.Tensor,
                            original_sizes=None,
@@ -164,7 +149,6 @@ def postprocess_prediction(pred_logits: torch.Tensor,
                                         mode="bilinear", align_corners=False).squeeze(1)
     return pred_logits
 
-
 def compute_batch_metrics(pred_masks, labels) -> tuple:
     ious, dices = [], []
     labels_np = labels.cpu().numpy()
@@ -174,24 +158,75 @@ def compute_batch_metrics(pred_masks, labels) -> tuple:
         dices.append(dice)
     return ious, dices
 
+def train_one_epoch(model, train_loader, optimizer, processor, device, cfg, task):
+    model.train()
+    epoch_loss = 0.0
+    pbar = tqdm(train_loader, desc="Training", ncols=100)
+    for batch_idx, batch in enumerate(pbar):
+        optimizer.zero_grad()
+        # Prepare labels for loss computation
+        labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
+        # Prepare inputs using the helper
+        inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
+        outputs = model(**inputs)
+        pred_logits = select_best_mask(outputs)
+        pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
+        pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
+        loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+
+        if batch_idx % cfg.training.log_interval == 0:
+            current_iter = batch_idx  # Simplified iteration count here; adjust as needed.
+            print(f"Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}")
+            task.get_logger().report_scalar("loss", "train", iteration=current_iter, value=loss.item())
+    avg_loss = epoch_loss / len(train_loader)
+    print(f"Average Training Loss: {avg_loss:.4f}")
+    task.get_logger().report_scalar("epoch_loss", "train", iteration=0, value=avg_loss)
+    return avg_loss
+
+def validate(model, val_loader, processor, device, cfg, task):
+    model.eval()
+    ious, dices = [], []
+    val_loss = 0.0
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Validation", ncols=100):
+            labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
+            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
+            outputs = model(**inputs, multimask_output=False)
+            pred_logits = select_best_mask(outputs)
+            pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
+            pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
+            batch_loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+            val_loss += batch_loss.item()
+            pred_masks = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()
+            batch_ious, batch_dices = compute_batch_metrics(pred_masks, labels)
+            ious.extend(batch_ious)
+            dices.extend(batch_dices)
+    avg_loss = val_loss / len(val_loader)
+    avg_iou = np.mean(ious) if ious else 0.0
+    avg_dice = np.mean(dices) if dices else 0.0
+    print(f"Validation - Loss: {avg_loss:.4f}, Average IoU: {avg_iou:.4f}, Average Dice: {avg_dice:.4f}")
+    task.get_logger().report_scalar("val_loss", "val", iteration=0, value=avg_loss)
+    task.get_logger().report_scalar("val_iou", "val", iteration=0, value=avg_iou)
+    task.get_logger().report_scalar("val_dice", "val", iteration=0, value=avg_dice)
+    return avg_loss, avg_iou, avg_dice
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
-
     # Set ClearML environment variables and initialize task
     os.environ["CLEARML_WEB_HOST"] = "https://app.clear.ml/"
     os.environ["CLEARML_API_HOST"] = "https://api.clear.ml"
     os.environ["CLEARML_FILES_HOST"] = "https://files.clear.ml"
-    os.environ["CLEARML_API_ACCESS_KEY"] = "VH2OIPC5NKDGRNFJ9LW5W2KSU3YP4T"
-    os.environ["CLEARML_API_SECRET_KEY"] = "Ixtz1NVs8wKDzNfyakkHIHHWN_Oy4vuzwbza8gu2za5SZpcl62e3s6v3s7uN9SzKbII"
+    os.environ["CLEARML_API_ACCESS_KEY"] = ""
+    os.environ["CLEARML_API_SECRET_KEY"] = ""
 
     task = Task.init(project_name=cfg.clearml.project_name, task_name=cfg.clearml.task_name)
     task.connect(OmegaConf.to_container(cfg, resolve=True))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Initialize model and processor
     model = SamModel.from_pretrained(cfg.model.pretrained).to(device)
     processor = SamProcessor.from_pretrained(cfg.model.pretrained)
 
@@ -224,14 +259,23 @@ def main(cfg: DictConfig):
         d_dict["augmentation_pipeline"] = augmentation_pipeline
         train_dataset_configs.append(d_dict)
 
-    train_dataset = create_combined_dataset(train_dataset_configs)
-    train_size = int(0.8 * len(train_dataset))
-    val_size = len(train_dataset) - train_size
-    train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size])
+    full_dataset = create_combined_dataset(train_dataset_configs)
+    num_samples = len(full_dataset)
+    indices = list(range(num_samples))
+
+    random.shuffle(indices)
+    train_split = int(cfg.training.train_val_split * num_samples)
+    train_indices = indices[:train_split]
+    val_indices = indices[train_split:]
+    train_dataset = Subset(full_dataset, train_indices)
+    val_dataset = Subset(full_dataset, val_indices)
     
-    # For faster iterations, take a subset for training and validation
-    # indices = list(range(10))
-    # train_subset = Subset(train_dataset, indices)
+    if cfg.training.use_subset:
+        subset_size = cfg.training.size_of_subset
+        train_indices = list(range(min(subset_size, len(train_dataset))))
+        train_dataset = Subset(train_dataset, train_indices)
+        val_indices = list(range(min(subset_size, len(val_dataset))))
+        val_dataset = Subset(val_dataset, val_indices)
 
     train_loader = DataLoader(
         train_dataset,
@@ -240,8 +284,6 @@ def main(cfg: DictConfig):
         num_workers=cfg.training.num_workers,
         collate_fn=custom_collate
     )
-    
-    # val_subset = Subset(val_dataset, indices)
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.training.batch_size,
@@ -250,69 +292,13 @@ def main(cfg: DictConfig):
         collate_fn=custom_collate
     )
 
-    # Training loop
     for epoch in range(cfg.training.epochs):
-        model.train()
-        epoch_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", ncols=100)
-        for batch_idx, batch in enumerate(pbar):
-            optimizer.zero_grad()
-
-            # Prepare labels for loss computation
-            labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
-
-            # Prepare inputs using the helper
-            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
-            outputs = model(**inputs)
-            pred_logits = select_best_mask(outputs)
-            # Safely obtain pad_size from config; defaults if key not present.
-            pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
-            pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
-            
-            loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-
-            if batch_idx % cfg.training.log_interval == 0:
-                current_iter = epoch * len(train_loader) + batch_idx
-                print(f"Epoch [{epoch+1}/{cfg.training.epochs}] Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}")
-                task.get_logger().report_scalar("loss", "train", iteration=current_iter, value=loss.item())
-
-        avg_loss = epoch_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{cfg.training.epochs}] Average Loss: {avg_loss:.4f}")
-        task.get_logger().report_scalar("epoch_loss", "train", iteration=epoch, value=avg_loss)
-
-        # Validation loop
-        model.eval()
-        ious, dices = [], []
-        with torch.no_grad():
-            for batch in val_loader:
-                labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
-                inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
-                
-                outputs = model(**inputs, multimask_output=False)
-                pred_logits = select_best_mask(outputs)
-                pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
-                pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
-                
-                val_loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
-                
-                pred_masks = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()
-                batch_ious, batch_dices = compute_batch_metrics(pred_masks, labels)
-                ious.extend(batch_ious)
-                dices.extend(batch_dices)
-
-        avg_iou = np.mean(ious) if ious else 0.0
-        avg_dice = np.mean(dices) if dices else 0.0
-        print(f"Validation - Loss: {val_loss.item():.4f}, Average IoU: {avg_iou:.4f}, Average Dice: {avg_dice:.4f}")
-        task.get_logger().report_scalar("val_loss", "val", iteration=epoch, value=val_loss.item())
-        task.get_logger().report_scalar("val_iou", "val", iteration=epoch, value=avg_iou)
-        task.get_logger().report_scalar("val_dice", "val", iteration=epoch, value=avg_dice)
+        print(f"Epoch {epoch+1}/{cfg.training.epochs}")
+        train_loss = train_one_epoch(model, train_loader, optimizer, processor, device, cfg, task)
+        val_loss, avg_iou, avg_dice = validate(model, val_loader, processor, device, cfg, task)
 
     print("Training complete.")
 
-    # Testing
     test_data_cfg = {
         "type": cfg.test_data.get("type", "2D"),
         "seismic_dir": cfg.test_data.seismic_dir,
@@ -331,6 +317,8 @@ def main(cfg: DictConfig):
         total = len(full_test_dataset)
         indices = list(range(total - test_idx, total))
         test_dataset = Subset(full_test_dataset, indices)
+    
+    print("Len test set:", len(test_dataset))
 
     test_loader = DataLoader(
         test_dataset,
