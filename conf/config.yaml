@@ -11,8 +11,8 @@ model:
     task_type: "FEATURE_EXTRACTION"
 
 training:
-  epochs: 2
-  batch_size: 4
+  epochs: 1
+  batch_size: 8
   lr: 1e-4
   warmup_steps: 140
   num_workers: 2
@@ -20,7 +20,8 @@ training:
   use_mask: true
   use_subset: false
   size_of_subset: 10
-  train_val_split: 0.8
+  train_val_split: 0.85
+  seed: 228
 
 train_data:
   - type: "2D"
@@ -60,6 +61,12 @@ test_data:
     height: 1024
     width: 1024
 
+prompt:
+  type: "point"           # "point", "circle", "bbox"
+  circle_mean_diameter: 10 
+  circle_diameter_delta: 5
+  bbox_error: 5
+
 clearml:
   project_name: "Rosneft segmentation"
-  task_name: "Experiment 15| select best mask (channel), with centre point | train on Salt2d, sabamrine | test 2d_paleovres | 2 epoch, 140 steps warmup"
+  task_name: "Experiment 21| select best mask (channel), with random circle| train on Salt2d, sabamrine | test rifs | 1 epoch, - steps warmup | 4 batch size | multimask_output=False | correct point"

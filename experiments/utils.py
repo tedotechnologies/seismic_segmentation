@@ -1,0 +1,225 @@
+import os
+import random
+import numpy as np
+import torch
+import torch.nn.functional as F
+import albumentations as A
+
+# Define your augmentation pipeline if it’s used in multiple places.
+augmentation_pipeline = A.Compose([
+    A.Resize(height=256, width=256, p=1.0),
+    # A.HorizontalFlip(p=0.5),
+    # A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
+], additional_targets={"mask2": "mask"})
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+def custom_collate(batch: list) -> dict:
+    return {
+        "filename": [item["filename"] for item in batch],
+        "seismic_img": [item["seismic_img"] for item in batch],
+        "label": [item["label"] for item in batch]
+    }
+
+def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5) -> tuple:
+    pred_bin = (pred > threshold).astype(np.uint8)
+    target_bin = (target > threshold).astype(np.uint8)
+    if pred_bin.sum() == 0 and target_bin.sum() == 0:
+        return 1.0, 1.0
+    intersection = np.logical_and(pred_bin, target_bin).sum()
+    union = np.logical_or(pred_bin, target_bin).sum()
+    iou = intersection / union if union != 0 else 0.0
+    pred_sum = pred_bin.sum()
+    target_sum = target_bin.sum()
+    dice = (2.0 * intersection) / (pred_sum + target_sum) if (pred_sum + target_sum) != 0 else 0.0
+    return iou, dice
+
+def select_best_mask(outputs) -> torch.Tensor:
+    """
+    Select the best mask based on highest IoU.
+    Supports outputs with shape (B, N, C, H, W) or (B, N, H, W).
+    Returns a tensor of shape (B, H, W).
+    """
+    if outputs.pred_masks.ndim == 5:
+        pred_masks_candidates = outputs.pred_masks[:, 0, :, :, :]  # (B, N, H, W)
+    else:
+        pred_masks_candidates = outputs.pred_masks[:, 0, :, :]
+    
+    iou_scores = outputs.iou_scores  # (B, N)
+    best_masks = []
+    for i in range(pred_masks_candidates.shape[0]):
+        best_idx = torch.argmax(iou_scores[i])
+        best_masks.append(pred_masks_candidates[i, best_idx, :, :])
+    return torch.stack(best_masks, dim=0)
+
+def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
+    """
+    Returns (points, labels) based on the prompt type. In 'point' mode,
+    returns a single positive point. In 'circle' mode, returns a circular mask prompt.
+    """
+    h, w = label.shape
+    nonzero_indices = np.argwhere(label == 1)
+    if len(nonzero_indices) > 0:
+        idx = random.randint(0, len(nonzero_indices) - 1)
+        y, x = nonzero_indices[idx]
+    else:
+        return [[0, 0]], [-1]
+
+    prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
+    if prompt_type == "circle":
+        mean_diameter = cfg.get("prompt", {}).get("circle_mean_diameter", 50)
+        delta = cfg.get("prompt", {}).get("circle_diameter_delta", 10)
+        diameter = random.uniform(mean_diameter - delta, mean_diameter + delta)
+        radius = diameter / 2.0
+
+        points = []
+        for j in range(max(0, int(y - radius)), min(h, int(y + radius) + 1)):
+            for i in range(max(0, int(x - radius)), min(w, int(x + radius) + 1)):
+                if (i - x) ** 2 + (j - y) ** 2 <= radius ** 2:
+                    points.append([i, j])
+        return points, [1] * len(points)
+    else:
+        return [[x, y]], [1]
+
+def interpolate_prediction(pred_logits: torch.Tensor,
+                             original_sizes: list,
+                             reshaped_input_sizes: list,
+                             labels: torch.Tensor,
+                             pad_size: dict) -> torch.Tensor:
+    target_image_size = (pad_size["height"], pad_size["width"])
+    pred_logits = pred_logits.unsqueeze(1)
+    pred_logits = F.interpolate(pred_logits, size=target_image_size, mode="bilinear", align_corners=False)
+    pred_logits = pred_logits.squeeze(1)
+    
+    pred_logits_list = []
+    for i, rs in enumerate(reshaped_input_sizes):
+        cropped = pred_logits[i, :rs[0], :rs[1]]
+        orig_size = labels[i].shape
+        upsampled = F.interpolate(cropped.unsqueeze(0).unsqueeze(0),
+                                  size=orig_size,
+                                  mode="bilinear",
+                                  align_corners=False)
+        pred_logits_list.append(upsampled.squeeze(0).squeeze(0))
+    return torch.stack(pred_logits_list, dim=0)
+
+def parse_mask_dtype(dtype_str):
+    if isinstance(dtype_str, str):
+        if dtype_str == "np.uint8":
+            return np.uint8
+        elif dtype_str == "np.uint32":
+            return np.uint32
+    return dtype_str
+
+def generate_bbox_prompt(label: np.ndarray, cfg=None) -> list:
+    """
+    Computes a bounding box covering all positive pixels in label,
+    adding a random error defined in cfg.
+    Returns a list: [x_min, y_min, x_max, y_max].
+    """
+    h, w = label.shape
+    nonzero_indices = np.argwhere(label == 1)
+    if len(nonzero_indices) == 0:
+        return [0, 0, 0, 0]
+    
+    y_coords, x_coords = nonzero_indices[:, 0], nonzero_indices[:, 1]
+    x_min = int(x_coords.min())
+    x_max = int(x_coords.max())
+    y_min = int(y_coords.min())
+    y_max = int(y_coords.max())
+    
+    bbox_error = cfg.get("prompt", {}).get("bbox_error", 5) if cfg is not None else 5
+
+    x_min = max(0, x_min + random.randint(-bbox_error, bbox_error))
+    y_min = max(0, y_min + random.randint(-bbox_error, bbox_error))
+    x_max = min(w - 1, x_max + random.randint(-bbox_error, bbox_error))
+    y_max = min(h - 1, y_max + random.randint(-bbox_error, bbox_error))
+    
+    return [x_min, y_min, x_max, y_max]
+
+def pad_prompts(batch_points, batch_labels, pad_point=[0, 0], pad_label=-1):
+    max_points = max(len(points) for points in batch_points)
+    padded_points = []
+    padded_labels = []
+    for points, labels in zip(batch_points, batch_labels):
+        n = len(points)
+        if n < max_points:
+            padded_points.append(points + [pad_point] * (max_points - n))
+            padded_labels.append(labels + [pad_label] * (max_points - n))
+        else:
+            padded_points.append(points)
+            padded_labels.append(labels)
+    return padded_points, padded_labels
+
+def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
+    """
+    Prepares inputs for the model. Depending on the prompt type in cfg,
+    it generates either bounding box prompts or point prompts.
+    """
+    prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
+    
+    if prompt_type == "bbox":
+        batch_input_boxes = []
+        for lbl in batch["label"]:
+            label = torch.tensor(lbl)
+            bbox = generate_bbox_prompt(label.cpu().numpy(), cfg)
+            bbox = [float(coord) for coord in bbox]
+            batch_input_boxes.append([bbox])
+        inputs = processor(
+            batch["seismic_img"],
+            input_boxes=batch_input_boxes,
+            return_tensors="pt"
+        )
+    else:
+        batch_input_points = []
+        batch_input_labels = []
+        for lbl in batch["label"]:
+            label = torch.tensor(lbl)
+            points, prompt_labels = generate_input_points_and_labels(label.cpu().numpy(), cfg)
+            batch_input_points.append(points)
+            batch_input_labels.append(prompt_labels)
+        batch_input_points, batch_input_labels = pad_prompts(batch_input_points, batch_input_labels)
+        inputs = processor(
+            batch["seismic_img"],
+            input_points=batch_input_points,
+            input_labels=batch_input_labels,
+            return_tensors="pt"
+        )
+    
+    original_sizes = inputs.pop("original_sizes", None)
+    reshaped_input_sizes = inputs.pop("reshaped_input_sizes", None)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    return inputs, original_sizes, reshaped_input_sizes
+
+def postprocess_prediction(pred_logits: torch.Tensor,
+                             labels: torch.Tensor,
+                             original_sizes=None,
+                             reshaped_input_sizes=None,
+                             pad_size: dict = {"height": 1024, "width": 1024}) -> torch.Tensor:
+    if pred_logits.shape[-2:] != labels.shape[-2:]:
+        if original_sizes is not None and reshaped_input_sizes is not None:
+            pred_logits = interpolate_prediction(pred_logits, original_sizes,
+                                                 reshaped_input_sizes, labels, pad_size)
+        else:
+            pred_logits = F.interpolate(
+                pred_logits.unsqueeze(1),
+                size=(pad_size["height"], pad_size["width"]),
+                mode="bilinear",
+                align_corners=False).squeeze(1)
+    return pred_logits
+
+def compute_batch_metrics(pred_masks, labels) -> tuple:
+    ious, dices = [], []
+    labels_np = labels.cpu().numpy()
+    for pred_mask, label in zip(pred_masks, labels_np):
+        iou, dice = compute_metrics(pred_mask, label)
+        ious.append(iou)
+        dices.append(dice)
+    return ious, dices
