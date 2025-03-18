@@ -1,16 +1,19 @@
 import os
 import random
+
+import albumentations as A
 import numpy as np
 import torch
 import torch.nn.functional as F
-import albumentations as A
 
-
-augmentation_pipeline = A.Compose([
-    A.Resize(height=256, width=256, p=1.0),
-    # A.HorizontalFlip(p=0.5),
-    # A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
-], additional_targets={"mask2": "mask"})
+augmentation_pipeline = A.Compose(
+    [
+        A.Resize(height=256, width=256, p=1.0),
+        # A.HorizontalFlip(p=0.5),
+        # A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
+    ],
+    additional_targets={"mask2": "mask"},
+)
 
 
 def seed_everything(seed: int):
@@ -28,7 +31,7 @@ def custom_collate(batch: list) -> dict:
     return {
         "filename": [item["filename"] for item in batch],
         "seismic_img": [item["seismic_img"] for item in batch],
-        "label": [item["label"] for item in batch]
+        "label": [item["label"] for item in batch],
     }
 
 
@@ -56,7 +59,7 @@ def select_best_mask(outputs) -> torch.Tensor:
         pred_masks_candidates = outputs.pred_masks[:, 0, :, :, :]  # (B, N, H, W)
     else:
         pred_masks_candidates = outputs.pred_masks[:, 0, :, :]
-    
+
     iou_scores = outputs.iou_scores  # (B, N)
     best_masks = []
     for i in range(pred_masks_candidates.shape[0]):
@@ -75,7 +78,7 @@ def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
     h, w = label.shape
     positive_indices = np.argwhere(label == 1)
     prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
-    
+
     if prompt_type == "circle":
         if len(positive_indices) > 0:
             idx = random.randint(0, len(positive_indices) - 1)
@@ -90,46 +93,52 @@ def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
         points = []
         for j in range(max(0, int(y - radius)), min(h, int(y + radius) + 1)):
             for i in range(max(0, int(x - radius)), min(w, int(x + radius) + 1)):
-                if (i - x) ** 2 + (j - y) ** 2 <= radius ** 2:
+                if (i - x) ** 2 + (j - y) ** 2 <= radius**2:
                     points.append([i, j])
         return points, [1] * len(points)
-    
+
     elif prompt_type == "point":
         num_points = cfg.get("prompt", {}).get("num_points", 1)
         if len(positive_indices) > 0:
             if len(positive_indices) >= num_points:
-                selected = positive_indices[np.random.choice(len(positive_indices), num_points, replace=False)]
+                selected = positive_indices[
+                    np.random.choice(len(positive_indices), num_points, replace=False)
+                ]
             else:
                 selected = positive_indices
             points = [[int(pt[1]), int(pt[0])] for pt in selected]
             return points, [1] * len(points)
         else:
             return [[0, 0]], [-1]
-    
+
     elif prompt_type == "bbox":
         return generate_bbox_prompt(label, cfg), None
 
 
-def interpolate_prediction(pred_logits: torch.Tensor,
-                             original_sizes: list,
-                             reshaped_input_sizes: list,
-                             labels: torch.Tensor,
-                             pad_size: dict) -> torch.Tensor:
+def interpolate_prediction(
+    pred_logits: torch.Tensor,
+    original_sizes: list,
+    reshaped_input_sizes: list,
+    labels: torch.Tensor,
+    pad_size: dict,
+) -> torch.Tensor:
     target_image_size = (pad_size["height"], pad_size["width"])
     pred_logits = pred_logits.unsqueeze(1)
-    pred_logits = F.interpolate(pred_logits, size=target_image_size, mode="bilinear", align_corners=False)
+    pred_logits = F.interpolate(
+        pred_logits, size=target_image_size, mode="bilinear", align_corners=False
+    )
     pred_logits = pred_logits.squeeze(1)
-    
+
     pred_logits_list = []
     for i, rs in enumerate(reshaped_input_sizes):
-        cropped = pred_logits[i, :rs[0], :rs[1]]
+        cropped = pred_logits[i, : rs[0], : rs[1]]
         orig_size = labels[i].shape
-        upsampled = F.interpolate(cropped.unsqueeze(0).unsqueeze(0),
-                                  size=orig_size,
-                                  mode="bilinear",
-                                  align_corners=False)
+        upsampled = F.interpolate(
+            cropped.unsqueeze(0).unsqueeze(0), size=orig_size, mode="bilinear", align_corners=False
+        )
         pred_logits_list.append(upsampled.squeeze(0).squeeze(0))
     return torch.stack(pred_logits_list, dim=0)
+
 
 def parse_mask_dtype(dtype_str):
     if isinstance(dtype_str, str):
@@ -138,6 +147,7 @@ def parse_mask_dtype(dtype_str):
         elif dtype_str == "np.uint32":
             return np.uint32
     return dtype_str
+
 
 def generate_bbox_prompt(label: np.ndarray, cfg=None) -> list:
     """
@@ -149,21 +159,22 @@ def generate_bbox_prompt(label: np.ndarray, cfg=None) -> list:
     nonzero_indices = np.argwhere(label == 1)
     if len(nonzero_indices) == 0:
         return [0, 0, 0, 0]
-    
+
     y_coords, x_coords = nonzero_indices[:, 0], nonzero_indices[:, 1]
     x_min = int(x_coords.min())
     x_max = int(x_coords.max())
     y_min = int(y_coords.min())
     y_max = int(y_coords.max())
-    
+
     bbox_error = cfg.get("prompt", {}).get("bbox_error", 5) if cfg is not None else 5
 
     x_min = max(0, x_min + random.randint(-bbox_error, bbox_error))
     y_min = max(0, y_min + random.randint(-bbox_error, bbox_error))
     x_max = min(w - 1, x_max + random.randint(-bbox_error, bbox_error))
     y_max = min(h - 1, y_max + random.randint(-bbox_error, bbox_error))
-    
+
     return [x_min, y_min, x_max, y_max]
+
 
 def pad_prompts(batch_points, batch_labels, pad_point=[0, 0], pad_label=-1):
     max_points = max(len(points) for points in batch_points)
@@ -179,13 +190,14 @@ def pad_prompts(batch_points, batch_labels, pad_point=[0, 0], pad_label=-1):
             padded_labels.append(labels)
     return padded_points, padded_labels
 
+
 def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
     """
     Prepares inputs for the model. Depending on the prompt type in cfg,
     it generates either bounding box prompts or point prompts.
     """
     prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
-    
+
     if prompt_type == "bbox":
         batch_input_boxes = []
         for lbl in batch["label"]:
@@ -196,7 +208,7 @@ def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
         inputs = processor(
             batch["seismic_img"],
             input_boxes=batch_input_boxes,
-            return_tensors="pt"
+            return_tensors="pt",
         )
     else:
         batch_input_points = []
@@ -211,30 +223,36 @@ def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
             batch["seismic_img"],
             input_points=batch_input_points,
             input_labels=batch_input_labels,
-            return_tensors="pt"
+            return_tensors="pt",
         )
-    
+
     original_sizes = inputs.pop("original_sizes", None)
     reshaped_input_sizes = inputs.pop("reshaped_input_sizes", None)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     return inputs, original_sizes, reshaped_input_sizes
 
-def postprocess_prediction(pred_logits: torch.Tensor,
-                             labels: torch.Tensor,
-                             original_sizes=None,
-                             reshaped_input_sizes=None,
-                             pad_size: dict = {"height": 1024, "width": 1024}) -> torch.Tensor:
+
+def postprocess_prediction(
+    pred_logits: torch.Tensor,
+    labels: torch.Tensor,
+    original_sizes=None,
+    reshaped_input_sizes=None,
+    pad_size: dict = {"height": 1024, "width": 1024},
+) -> torch.Tensor:
     if pred_logits.shape[-2:] != labels.shape[-2:]:
         if original_sizes is not None and reshaped_input_sizes is not None:
-            pred_logits = interpolate_prediction(pred_logits, original_sizes,
-                                                 reshaped_input_sizes, labels, pad_size)
+            pred_logits = interpolate_prediction(
+                pred_logits, original_sizes, reshaped_input_sizes, labels, pad_size
+            )
         else:
             pred_logits = F.interpolate(
                 pred_logits.unsqueeze(1),
                 size=(pad_size["height"], pad_size["width"]),
                 mode="bilinear",
-                align_corners=False).squeeze(1)
+                align_corners=False,
+            ).squeeze(1)
     return pred_logits
+
 
 def compute_batch_metrics(pred_masks, labels) -> tuple:
     ious, dices = [], []
@@ -254,22 +272,24 @@ def dice_loss(pred_logits: torch.Tensor, targets: torch.Tensor, epsilon=1e-7) ->
     """
     # Apply sigmoid to get probabilities
     pred_probs = torch.sigmoid(pred_logits)
-    
+
     # Flatten predictions and targets
     pred_flat = pred_probs.view(pred_probs.size(0), -1)
     targets_flat = targets.view(targets.size(0), -1)
-    
+
     # Compute intersection and denominator
     intersection = (pred_flat * targets_flat).sum(dim=1)
-    denominator = (pred_flat ** 2).sum(dim=1) + (targets_flat ** 2).sum(dim=1)
-    
+    denominator = (pred_flat**2).sum(dim=1) + (targets_flat**2).sum(dim=1)
+
     # Compute dice score per batch and convert to loss
     dice_score = (2 * intersection + epsilon) / (denominator + epsilon)
     loss = 1 - dice_score  # Dice loss
     return loss.mean()
 
 
-def combined_loss(pred_logits: torch.Tensor, targets: torch.Tensor, alpha: float = 0.3) -> torch.Tensor:
+def combined_loss(
+    pred_logits: torch.Tensor, targets: torch.Tensor, alpha: float = 0.3
+) -> torch.Tensor:
     """
     Computes the combined loss as a weighted sum of BCE loss and Dice loss.
     """

@@ -1,9 +1,8 @@
 import logging
-
 import os
-import numpy as np
 import random
 
+import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -16,23 +15,23 @@ logging.basicConfig(level=logging.INFO)
 
 
 def load_dat_file(
-        filepath: str,
-        shape=(224, 224)
-        ) -> np.ndarray:
+    filepath: str,
+    shape=(224, 224),
+) -> np.ndarray:
     data = np.fromfile(filepath, dtype=np.float32)
     return data.reshape(shape)
 
 
 def load_cube(
-        filepath: str,
-        shape=(256, 256, 256),
-        dtype=np.float32
-        )-> np.ndarray:
+    filepath: str,
+    shape=(256, 256, 256),
+    dtype=np.float32,
+) -> np.ndarray:
 
     data = np.fromfile(filepath, dtype=dtype)
     if data.size != np.prod(shape):
         raise ValueError(
-            f"Размер данных {data.size} не совпадает с ожидаемой формой {shape} для файла {filepath}"
+            f"Размер данных {data.size} не совпадает с ожидаемой формой {shape} для файла {filepath}",
         )
     return data.reshape(shape)
 
@@ -49,7 +48,7 @@ def apply_augmentations(sample, aug_pipeline):
     """
     Применяет аугментации к сэмплу.
     Ожидается, что aug_pipeline - это объект albumentations.Compose.
-    Аугментация применяется к "seismic_img" и "label". 
+    Аугментация применяется к "seismic_img" и "label".
     Если в сэмпле присутствует "mask_prompt", то и к нему тоже.
     """
     data = {"image": sample["seismic_img"], "mask": sample["label"]}
@@ -71,7 +70,9 @@ def to_pil_image(np_img: np.ndarray) -> Image.Image:
     """
     if np_img.dtype != np.uint8:
         if np_img.max() != np_img.min():
-            np_img = (255 * (np_img - np_img.min()) / (np_img.max() - np_img.min())).astype(np.uint8)
+            np_img = (255 * (np_img - np_img.min()) / (np_img.max() - np_img.min())).astype(
+                np.uint8
+            )
         else:
             np_img = np_img.astype(np.uint8)
     return Image.fromarray(np_img)
@@ -88,6 +89,7 @@ class SegmentationDataset(Dataset):
       - use_pil: если True, возвращает изображение в формате PIL, иначе numpy-массив
       - augmentation_pipeline: пайплайн аугментаций (albumentations.Compose)
     """
+
     def __init__(self, cfg: dict):
         self.data_type = cfg.get("type", "2D")
         self.seismic_dir = cfg["seismic_dir"]
@@ -141,10 +143,13 @@ def create_combined_dataset(configs: list) -> list:
 if __name__ == "__main__":
     # Пример использования
     if A is not None:
-        augmentation_pipeline = A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
-        ], additional_targets={"mask2": "mask"})
+        augmentation_pipeline = A.Compose(
+            [
+                A.HorizontalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
+            ],
+            additional_targets={"mask2": "mask"},
+        )
     else:
         augmentation_pipeline = None
 
@@ -168,7 +173,7 @@ if __name__ == "__main__":
         "mask_dtype": np.uint8,
         "num_slices": 3,
         "neighbor_offset": 1,
-        "augmentation_pipeline": augmentation_pipeline
+        "augmentation_pipeline": augmentation_pipeline,
     }
 
     config_3d_variant = {
@@ -179,7 +184,7 @@ if __name__ == "__main__":
         "mask_dtype": np.uint32,
         "num_slices": 3,
         "neighbor_offset": 1,
-        "augmentation_pipeline": augmentation_pipeline
+        "augmentation_pipeline": augmentation_pipeline,
     }
 
     all_configs = [config_2d, config_3d, config_3d_variant]

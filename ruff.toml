@@ -1,0 +1,33 @@
+line-length=100
+output-format = "concise"
+
+[lint]
+preview = true
+select = [
+    "E",    # Ошибки PEP8
+    "F",    # Ошибки Pyflakes (включает неиспользуемые импорты)
+    "I",    # Автоматическое упорядочивание импортов
+    "W",    # Предупреждения, включая пустые строки
+]
+extend-select = [
+    "E302",  # Проверяет количество пустых строк между функциями и классами
+    "E303",  # Проверяет количество подряд идущих пустых строк
+    "W391",  # Проверяет пустые строки в конце файла
+    "F401",  # Проверяет неиспользуемые импорты
+    "COM812",  # Checks for the absence of trailing commas.
+]
+ignore = [
+#    "E501",  # Отключаем проверку длины строк (если не требуется)
+]
+fixable = ["ALL"]
+unfixable = []
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.isort]
+combine-as-imports = true
+section-order = ["future", "standard-library", "third-party", "local-folder", "first-party"]
+known-local-folder = ["common"]
+
+[format]
+skip-magic-trailing-comma = true
