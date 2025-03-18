@@ -21,7 +21,8 @@ from utils import (
     seed_everything, custom_collate, 
     select_best_mask, parse_mask_dtype,
     prepare_inputs, postprocess_prediction,
-    compute_batch_metrics, augmentation_pipeline
+    compute_batch_metrics, augmentation_pipeline,
+    combined_loss
 )
 
 
@@ -57,7 +58,8 @@ def train_one_epoch(
         pred_logits = select_best_mask(outputs)
         pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
         pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
-        loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+        # loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+        loss = combined_loss(pred_logits, labels, alpha=0.3)
         loss.backward()
         optimizer.step()
         # scheduler.step()  # Update the learning rate scheduler
@@ -87,7 +89,8 @@ def validate(model, val_loader, processor, device, cfg, task):
             pred_logits = select_best_mask(outputs)
             pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
             pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
-            batch_loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+            # batch_loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
+            batch_loss = combined_loss(pred_logits, labels.float(), alpha=0.3)
             val_loss += batch_loss.item()
             pred_masks = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()
             batch_ious, batch_dices = compute_batch_metrics(pred_masks, labels)
@@ -124,6 +127,8 @@ def main(cfg: DictConfig):
     if cfg.model.freeze_base:
         for param in model.parameters():
             param.requires_grad = False
+        for param in model.mask_decoder.parameters():
+            param.requires_grad = True
 
     if cfg.model.use_lora:
         lora_cfg = cfg.model.lora_config
@@ -183,12 +188,11 @@ def main(cfg: DictConfig):
     )
 
     total_steps = cfg.training.epochs * len(train_loader)
-    # scheduler = get_cosine_schedule_with_warmup(
-    #     optimizer,
-    #     num_warmup_steps=cfg.training.warmup_steps,
-    #     num_training_steps=total_steps
-    # )
-    scheduler = None
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=cfg.training.warmup_steps,
+        num_training_steps=total_steps
+    )
 
     for epoch in range(cfg.training.epochs):
         logger.info("Epoch %d/%d", epoch+1, cfg.training.epochs)
@@ -231,7 +235,7 @@ def main(cfg: DictConfig):
     with torch.no_grad():
         for batch in test_loader:
             labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
-            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device)
+            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device, cfg)
             outputs = model(**inputs, multimask_output=False)
             pred_logits = select_best_mask(outputs)
             pad_size = test_data_cfg.get("pad_size", {"height": 1024, "width": 1024})

@@ -5,12 +5,13 @@ import torch
 import torch.nn.functional as F
 import albumentations as A
 
-# Define your augmentation pipeline if it’s used in multiple places.
+
 augmentation_pipeline = A.Compose([
     A.Resize(height=256, width=256, p=1.0),
     # A.HorizontalFlip(p=0.5),
     # A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
 ], additional_targets={"mask2": "mask"})
+
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -22,12 +23,14 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
 
+
 def custom_collate(batch: list) -> dict:
     return {
         "filename": [item["filename"] for item in batch],
         "seismic_img": [item["seismic_img"] for item in batch],
         "label": [item["label"] for item in batch]
     }
+
 
 def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5) -> tuple:
     pred_bin = (pred > threshold).astype(np.uint8)
@@ -41,6 +44,7 @@ def compute_metrics(pred: np.ndarray, target: np.ndarray, threshold: float = 0.5
     target_sum = target_bin.sum()
     dice = (2.0 * intersection) / (pred_sum + target_sum) if (pred_sum + target_sum) != 0 else 0.0
     return iou, dice
+
 
 def select_best_mask(outputs) -> torch.Tensor:
     """
@@ -60,21 +64,24 @@ def select_best_mask(outputs) -> torch.Tensor:
         best_masks.append(pred_masks_candidates[i, best_idx, :, :])
     return torch.stack(best_masks, dim=0)
 
+
 def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
     """
-    Returns (points, labels) based on the prompt type. In 'point' mode,
-    returns a single positive point. In 'circle' mode, returns a circular mask prompt.
+    Returns (points, labels) based on the prompt type.
+    For 'point' mode, it samples multiple positive points as given by cfg.prompt.num_points.
+    For 'circle' mode, it returns a circular mask prompt.
+    For 'bbox', it delegates to generate_bbox_prompt.
     """
     h, w = label.shape
-    nonzero_indices = np.argwhere(label == 1)
-    if len(nonzero_indices) > 0:
-        idx = random.randint(0, len(nonzero_indices) - 1)
-        y, x = nonzero_indices[idx]
-    else:
-        return [[0, 0]], [-1]
-
+    positive_indices = np.argwhere(label == 1)
     prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
+    
     if prompt_type == "circle":
+        if len(positive_indices) > 0:
+            idx = random.randint(0, len(positive_indices) - 1)
+            y, x = positive_indices[idx]
+        else:
+            return [[0, 0]], [-1]
         mean_diameter = cfg.get("prompt", {}).get("circle_mean_diameter", 50)
         delta = cfg.get("prompt", {}).get("circle_diameter_delta", 10)
         diameter = random.uniform(mean_diameter - delta, mean_diameter + delta)
@@ -86,8 +93,22 @@ def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
                 if (i - x) ** 2 + (j - y) ** 2 <= radius ** 2:
                     points.append([i, j])
         return points, [1] * len(points)
-    else:
-        return [[x, y]], [1]
+    
+    elif prompt_type == "point":
+        num_points = cfg.get("prompt", {}).get("num_points", 1)
+        if len(positive_indices) > 0:
+            if len(positive_indices) >= num_points:
+                selected = positive_indices[np.random.choice(len(positive_indices), num_points, replace=False)]
+            else:
+                selected = positive_indices
+            points = [[int(pt[1]), int(pt[0])] for pt in selected]
+            return points, [1] * len(points)
+        else:
+            return [[0, 0]], [-1]
+    
+    elif prompt_type == "bbox":
+        return generate_bbox_prompt(label, cfg), None
+
 
 def interpolate_prediction(pred_logits: torch.Tensor,
                              original_sizes: list,
@@ -223,3 +244,36 @@ def compute_batch_metrics(pred_masks, labels) -> tuple:
         ious.append(iou)
         dices.append(dice)
     return ious, dices
+
+
+def dice_loss(pred_logits: torch.Tensor, targets: torch.Tensor, epsilon=1e-7) -> torch.Tensor:
+    """
+    Computes the Dice loss.
+    pred_logits: raw logits from the network.
+    targets: ground truth binary masks.
+    """
+    # Apply sigmoid to get probabilities
+    pred_probs = torch.sigmoid(pred_logits)
+    
+    # Flatten predictions and targets
+    pred_flat = pred_probs.view(pred_probs.size(0), -1)
+    targets_flat = targets.view(targets.size(0), -1)
+    
+    # Compute intersection and denominator
+    intersection = (pred_flat * targets_flat).sum(dim=1)
+    denominator = (pred_flat ** 2).sum(dim=1) + (targets_flat ** 2).sum(dim=1)
+    
+    # Compute dice score per batch and convert to loss
+    dice_score = (2 * intersection + epsilon) / (denominator + epsilon)
+    loss = 1 - dice_score  # Dice loss
+    return loss.mean()
+
+
+def combined_loss(pred_logits: torch.Tensor, targets: torch.Tensor, alpha: float = 0.3) -> torch.Tensor:
+    """
+    Computes the combined loss as a weighted sum of BCE loss and Dice loss.
+    """
+    # Compute binary cross-entropy loss with logits
+    bce_loss = F.binary_cross_entropy_with_logits(pred_logits, targets.float())
+    d_loss = dice_loss(pred_logits, targets)
+    return alpha * bce_loss + (1 - alpha) * d_loss
