@@ -1,63 +1,70 @@
+import logging
 import os
 import random
-import logging
+
+import hydra
 import numpy as np
 import torch
-import torch.nn.functional as F
+from clearml import Task
+from omegaconf import DictConfig, OmegaConf
+from peft import LoraConfig, TaskType, get_peft_model
+from prepare_data import SegmentationDataset, create_combined_dataset
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
-import hydra
-from omegaconf import DictConfig, OmegaConf
-
-from peft import get_peft_model, LoraConfig, TaskType
 from transformers import (
     SamModel,
     SamProcessor,
     get_cosine_schedule_with_warmup,
-    )
-from clearml import Task
-from prepare_data import SegmentationDataset, create_combined_dataset
-from utils import (
-    seed_everything, custom_collate, 
-    select_best_mask, parse_mask_dtype,
-    prepare_inputs, postprocess_prediction,
-    compute_batch_metrics, augmentation_pipeline,
-    combined_loss
 )
 
+from utils import (
+    augmentation_pipeline,
+    combined_loss,
+    compute_batch_metrics,
+    custom_collate,
+    parse_mask_dtype,
+    postprocess_prediction,
+    prepare_inputs,
+    seed_everything,
+    select_best_mask,
+)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 
 def train_one_epoch(
-        model,
-        train_loader,
-        optimizer,
-        scheduler,
-        processor,
-        device,
-        cfg,
-        task
-        ):
-    
+    model,
+    train_loader,
+    optimizer,
+    scheduler,
+    processor,
+    device,
+    cfg,
+    task,
+):
+
     model.train()
     epoch_loss = 0.0
     pbar = tqdm(train_loader, desc="Training", ncols=100)
     for batch_idx, batch in enumerate(pbar):
         optimizer.zero_grad()
 
-        labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
+        labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(
+            device
+        )
 
         inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device, cfg)
         outputs = model(**inputs, multimask_output=False)
         pred_logits = select_best_mask(outputs)
         pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
-        pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
+        pred_logits = postprocess_prediction(
+            pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size
+        )
         # loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
         loss = combined_loss(pred_logits, labels, alpha=0.3)
         loss.backward()
@@ -68,8 +75,12 @@ def train_one_epoch(
         if batch_idx % cfg.training.log_interval == 0:
             current_iter = batch_idx  # Simplified iteration count here; adjust as needed.
             current_lr = optimizer.param_groups[0]["lr"]
-            logger.info(f"Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}, LR: {current_lr}")
-            task.get_logger().report_scalar("loss", "train", iteration=current_iter, value=loss.item())
+            logger.info(
+                f"Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}, LR: {current_lr}"
+            )
+            task.get_logger().report_scalar(
+                "loss", "train", iteration=current_iter, value=loss.item()
+            )
 
     avg_loss = epoch_loss / len(train_loader)
     logger.info(f"Average Training Loss: {avg_loss:.4f}")
@@ -83,12 +94,18 @@ def validate(model, val_loader, processor, device, cfg, task):
     val_loss = 0.0
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation", ncols=100):
-            labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(device)
-            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device, cfg)
+            labels = torch.stack([(torch.tensor(lbl) != 0).float() for lbl in batch["label"]]).to(
+                device
+            )
+            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(
+                batch, processor, device, cfg
+            )
             outputs = model(**inputs, multimask_output=False)
             pred_logits = select_best_mask(outputs)
             pad_size = cfg.get("data", {}).get("pad_size", {"height": 1024, "width": 1024})
-            pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
+            pred_logits = postprocess_prediction(
+                pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size
+            )
             # batch_loss = F.binary_cross_entropy_with_logits(pred_logits, labels.float())
             batch_loss = combined_loss(pred_logits, labels.float(), alpha=0.3)
             val_loss += batch_loss.item()
@@ -99,7 +116,9 @@ def validate(model, val_loader, processor, device, cfg, task):
     avg_loss = val_loss / len(val_loader)
     avg_iou = np.mean(ious) if ious else 0.0
     avg_dice = np.mean(dices) if dices else 0.0
-    logger.info(f"Validation - Loss: {avg_loss:.4f}, Average IoU: {avg_iou:.4f}, Average Dice: {avg_dice:.4f}")
+    logger.info(
+        f"Validation - Loss: {avg_loss:.4f}, Average IoU: {avg_iou:.4f}, Average Dice: {avg_dice:.4f}"
+    )
     task.get_logger().report_scalar("val_loss", "val", iteration=0, value=avg_loss)
     task.get_logger().report_scalar("val_iou", "val", iteration=0, value=avg_iou)
     task.get_logger().report_scalar("val_dice", "val", iteration=0, value=avg_dice)
@@ -115,7 +134,9 @@ def main(cfg: DictConfig):
     os.environ["CLEARML_API_HOST"] = "https://api.clear.ml"
     os.environ["CLEARML_FILES_HOST"] = "https://files.clear.ml"
     os.environ["CLEARML_API_ACCESS_KEY"] = ""
-    os.environ["CLEARML_API_SECRET_KEY"] = ""
+    os.environ["CLEARML_API_SECRET_KEY"] = (
+        ""
+    )
 
     task = Task.init(project_name=cfg.clearml.project_name, task_name=cfg.clearml.task_name)
     task.connect(OmegaConf.to_container(cfg, resolve=True))
@@ -138,11 +159,13 @@ def main(cfg: DictConfig):
             target_modules=lora_cfg.target_modules,
             lora_dropout=lora_cfg.lora_dropout,
             bias=lora_cfg.bias,
-            task_type=TaskType.FEATURE_EXTRACTION
+            task_type=TaskType.FEATURE_EXTRACTION,
         )
         model = get_peft_model(model, lora_config)
 
-    logger.info("Trainable parameters: %d", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    logger.info(
+        "Trainable parameters: %d", sum(p.numel() for p in model.parameters() if p.requires_grad)
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr)
 
     train_dataset_configs = []
@@ -164,7 +187,7 @@ def main(cfg: DictConfig):
     val_indices = indices[train_split:]
     train_dataset = Subset(full_dataset, train_indices)
     val_dataset = Subset(full_dataset, val_indices)
-    
+
     if cfg.training.use_subset:
         subset_size = cfg.training.size_of_subset
         train_indices = list(range(min(subset_size, len(train_dataset))))
@@ -177,80 +200,89 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         shuffle=True,
         num_workers=cfg.training.num_workers,
-        collate_fn=custom_collate
+        collate_fn=custom_collate,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
         num_workers=cfg.training.num_workers,
-        collate_fn=custom_collate
+        collate_fn=custom_collate,
     )
 
     total_steps = cfg.training.epochs * len(train_loader)
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=cfg.training.warmup_steps,
-        num_training_steps=total_steps
+        num_training_steps=total_steps,
     )
 
     for epoch in range(cfg.training.epochs):
-        logger.info("Epoch %d/%d", epoch+1, cfg.training.epochs)
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, processor, device, cfg, task)
+        logger.info("Epoch %d/%d", epoch + 1, cfg.training.epochs)
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, scheduler, processor, device, cfg, task
+        )
         val_loss, avg_iou, avg_dice = validate(model, val_loader, processor, device, cfg, task)
 
     logger.info("Training complete.")
 
-    test_data_cfg = {
-        "type": cfg.test_data.get("type", "2D"),
-        "seismic_dir": cfg.test_data.seismic_dir,
-        "label_dir": cfg.test_data.label_dir,
-        "shape": tuple(cfg.test_data.shape),
-        "mask_dtype": np.uint8 if cfg.test_data.mask_dtype == "np.uint8" else cfg.test_data.mask_dtype,
-        "pad_size": cfg.test_data.pad_size,
-        "use_pil": True
-    }
-    full_test_dataset = SegmentationDataset(test_data_cfg)
-    test_idx = 0
+    for _, test_cfg in enumerate(cfg.test_data):
+        logger.info("Evaluating Test Dataset: %s", test_cfg.name)
+        # Prepare test dataset config similar to training data
+        test_data_cfg = {
+            "type": test_cfg.get("type", "2D"),
+            "seismic_dir": test_cfg.seismic_dir,
+            "label_dir": test_cfg.label_dir,
+            "shape": tuple(test_cfg.shape),
+            "mask_dtype": np.uint8 if test_cfg.mask_dtype == "np.uint8" else test_cfg.mask_dtype,
+            "pad_size": test_cfg.pad_size,
+            "use_pil": True,
+        }
+        full_test_dataset = SegmentationDataset(test_data_cfg)
 
-    try:
-        test_dataset = full_test_dataset[-test_idx:]
-    except TypeError:
-        total = len(full_test_dataset)
-        indices = list(range(total - test_idx, total))
-        test_dataset = Subset(full_test_dataset, indices)
-    
-    logger.info("Len test set: %d", len(test_dataset))
+        test_loader = DataLoader(
+            full_test_dataset,
+            batch_size=cfg.training.batch_size,
+            shuffle=False,
+            num_workers=cfg.training.num_workers,
+            collate_fn=custom_collate,
+        )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        num_workers=cfg.training.num_workers,
-        collate_fn=custom_collate
-    )
+        model.eval()
+        test_ious, test_dices = [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
+                inputs, original_sizes, reshaped_input_sizes = prepare_inputs(
+                    batch, processor, device, cfg
+                )
+                outputs = model(**inputs, multimask_output=False)
+                pred_logits = select_best_mask(outputs)
+                pad_size = test_data_cfg.get("pad_size", {"height": 1024, "width": 1024})
+                pred_logits = postprocess_prediction(
+                    pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size
+                )
 
-    model.eval()
-    test_ious, test_dices = [], []
-    with torch.no_grad():
-        for batch in test_loader:
-            labels = torch.stack([torch.tensor(lbl) for lbl in batch["label"]]).to(device)
-            inputs, original_sizes, reshaped_input_sizes = prepare_inputs(batch, processor, device, cfg)
-            outputs = model(**inputs, multimask_output=False)
-            pred_logits = select_best_mask(outputs)
-            pad_size = test_data_cfg.get("pad_size", {"height": 1024, "width": 1024})
-            pred_logits = postprocess_prediction(pred_logits, labels, original_sizes, reshaped_input_sizes, pad_size)
-            
-            pred_masks = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()
-            batch_ious, batch_dices = compute_batch_metrics(pred_masks, labels)
-            test_ious.extend(batch_ious)
-            test_dices.extend(batch_dices)
+                pred_masks = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()
+                batch_ious, batch_dices = compute_batch_metrics(pred_masks, labels)
+                test_ious.extend(batch_ious)
+                test_dices.extend(batch_dices)
 
-    avg_test_iou = np.mean(test_ious) if test_ious else 0.0
-    avg_test_dice = np.mean(test_dices) if test_dices else 0.0
-    logger.info("Test - Average IoU: %.4f, Average Dice: %.4f", avg_test_iou, avg_test_dice)
-    task.get_logger().report_scalar("test_iou", "test", iteration=0, value=avg_test_iou)
-    task.get_logger().report_scalar("test_dice", "test", iteration=0, value=avg_test_dice)
+        avg_test_iou = np.mean(test_ious) if test_ious else 0.0
+        avg_test_dice = np.mean(test_dices) if test_dices else 0.0
+        logger.info(
+            "Test Dataset: %s - Average IoU: %.4f, Average Dice: %.4f",
+            test_cfg.name,
+            avg_test_iou,
+            avg_test_dice,
+        )
+        task.get_logger().report_scalar(
+            "test_iou", f"test_dataset_{test_cfg.name}", iteration=0, value=avg_test_iou
+        )
+        task.get_logger().report_scalar(
+            "test_dice", f"test_dataset_{test_cfg.name}", iteration=0, value=avg_test_dice
+        )
+
 
 if __name__ == "__main__":
     main()

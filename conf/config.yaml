@@ -52,14 +52,31 @@ train_data:
       width: 1024
 
 test_data:
-  type: "2D"
-  seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/seismic"
-  label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/label"
-  shape: [301, 301]
-  mask_dtype: "np.uint8"
-  pad_size:
-    height: 1024
-    width: 1024
+  - name: "paleovres"
+    type: "2D"
+    seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/2d_paleovres/seismic"
+    label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/2d_paleovres/label"
+    shape: [401, 401]
+    mask_dtype: "np.uint8"
+    pad_size:
+      height: 1024
+      width: 1024
+  - name: "rifs"
+    type: "2D"
+    seismic_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/seismic"
+    label_dir: "/home/dmatveev/workdir/rosneft_segmentation/data/from_rosneft/rifs/label"
+    shape: [301, 301]
+    mask_dtype: "np.uint8"
+    pad_size:
+      height: 1024
+      width: 1024
+
+prompt:
+  type: "point"           # "point", "circle", "bbox"
+  num_points: 16
+  circle_mean_diameter: 10 
+  circle_diameter_delta: 2
+  bbox_error: 0
 
 prompt:
   type: "point"           # "point", "circle", "bbox"
@@ -70,4 +87,4 @@ prompt:
 
 clearml:
   project_name: "Rosneft segmentation"
-  task_name: "Experiment 24| select best mask (channel), with random circle| train on Salt2d, sabamrine | test rifs | 1 epoch, - steps warmup | 4 batch size | multimask_output=False | correct point| 16 random points"
+  task_name: "Experiment 26| select best mask (channel), with 16 points| train on Salt2d, sabamrine | test paleovreses, rifs | 2 epoch, - steps warmup | 4 batch size | multimask_output=False"
