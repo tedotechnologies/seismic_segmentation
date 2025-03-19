@@ -70,32 +70,48 @@ def select_best_mask(outputs) -> torch.Tensor:
 
 def generate_input_points_and_labels(label: np.ndarray, cfg=None) -> tuple:
     """
-    Returns (points, labels) based on the prompt type.
-    For 'point' mode, it samples multiple positive points as given by cfg.prompt.num_points.
-    For 'circle' mode, it returns a circular mask prompt.
-    For 'bbox', it delegates to generate_bbox_prompt.
+    Возвращает (points, labels) в зависимости от типа промпта.
+    Для режима "point" выбираются случайные положительные точки в количестве,
+    заданном cfg.prompt.num_points.
+    Для режима "circle" генерируется указанное число кругов (cfg.prompt.num_circles).
+      Для каждого круга сначала выбирается случайная положительная точка (центр),
+      затем генерируются все точки внутри круга с диаметром, случайно выбранным
+      вокруг cfg.prompt.circle_mean_diameter с допуском cfg.prompt.circle_diameter_delta.
+    Для режима "bbox" делегирует вычисление функции generate_bbox_prompt.
     """
     h, w = label.shape
     positive_indices = np.argwhere(label == 1)
     prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
 
     if prompt_type == "circle":
-        if len(positive_indices) > 0:
+        num_circles = cfg.get("prompt", {}).get("num_circles", 1)
+        points = []
+        labels_list = []
+        if len(positive_indices) == 0:
+            return [[0, 0]], [-1]
+
+        mean_diameter = cfg.get("prompt", {}).get("circle_mean_diameter", 10)
+        delta = cfg.get("prompt", {}).get("circle_diameter_delta", 2)
+
+        for _ in range(num_circles):
             idx = random.randint(0, len(positive_indices) - 1)
             y, x = positive_indices[idx]
-        else:
-            return [[0, 0]], [-1]
-        mean_diameter = cfg.get("prompt", {}).get("circle_mean_diameter", 50)
-        delta = cfg.get("prompt", {}).get("circle_diameter_delta", 10)
-        diameter = random.uniform(mean_diameter - delta, mean_diameter + delta)
-        radius = diameter / 2.0
+            center_point = [int(x), int(y)]
+            points.append(center_point)
+            labels_list.append(1)
 
-        points = []
-        for j in range(max(0, int(y - radius)), min(h, int(y + radius) + 1)):
-            for i in range(max(0, int(x - radius)), min(w, int(x + radius) + 1)):
-                if (i - x) ** 2 + (j - y) ** 2 <= radius**2:
-                    points.append([i, j])
-        return points, [1] * len(points)
+            diameter = random.uniform(mean_diameter - delta, mean_diameter + delta)
+            radius = diameter / 2.0
+
+            for j in range(max(0, int(y - radius)), min(h, int(y + radius) + 1)):
+                for i in range(max(0, int(x - radius)), min(w, int(x + radius) + 1)):
+                    if (i - x) ** 2 + (j - y) ** 2 <= radius ** 2:
+                        # Пропускаем точку центра, чтобы не дублировать
+                        if i == x and j == y:
+                            continue
+                        points.append([i, j])
+                        labels_list.append(1)
+        return points, labels_list
 
     elif prompt_type == "point":
         num_points = cfg.get("prompt", {}).get("num_points", 1)
@@ -270,18 +286,14 @@ def dice_loss(pred_logits: torch.Tensor, targets: torch.Tensor, epsilon=1e-7) ->
     pred_logits: raw logits from the network.
     targets: ground truth binary masks.
     """
-    # Apply sigmoid to get probabilities
     pred_probs = torch.sigmoid(pred_logits)
 
-    # Flatten predictions and targets
     pred_flat = pred_probs.view(pred_probs.size(0), -1)
     targets_flat = targets.view(targets.size(0), -1)
 
-    # Compute intersection and denominator
     intersection = (pred_flat * targets_flat).sum(dim=1)
     denominator = (pred_flat**2).sum(dim=1) + (targets_flat**2).sum(dim=1)
 
-    # Compute dice score per batch and convert to loss
     dice_score = (2 * intersection + epsilon) / (denominator + epsilon)
     loss = 1 - dice_score  # Dice loss
     return loss.mean()
@@ -293,7 +305,6 @@ def combined_loss(
     """
     Computes the combined loss as a weighted sum of BCE loss and Dice loss.
     """
-    # Compute binary cross-entropy loss with logits
     bce_loss = F.binary_cross_entropy_with_logits(pred_logits, targets.float())
     d_loss = dice_loss(pred_logits, targets)
     return alpha * bce_loss + (1 - alpha) * d_loss

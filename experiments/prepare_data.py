@@ -113,6 +113,8 @@ class SegmentationDataset(Dataset):
         seismic = load_dat_file(seismic_path, shape=self.shape)
         label = load_dat_file(label_path, shape=self.shape)
 
+        label = (label > 0).astype(np.uint8)
+
         if seismic.ndim == 2:
             seismic_img = np.stack([seismic] * 3, axis=-1)
         else:

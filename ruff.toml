@@ -1,3 +1,13 @@
+exclude = [
+    ".git",
+    ".pyenv",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    ".vscode",
+    "__pypackages__",
+]
+
 line-length=100
 output-format = "concise"
 
@@ -30,4 +40,7 @@ section-order = ["future", "standard-library", "third-party", "local-folder", "f
 known-local-folder = ["common"]
 
 [format]
+quote-style = "double"
+indent-style = "space"
 skip-magic-trailing-comma = true
+line-ending = "auto"

@@ -153,10 +153,12 @@ def main(cfg: DictConfig):
 
     if cfg.model.use_lora:
         lora_cfg = cfg.model.lora_config
+        target_modules = list(lora_cfg.target_modules)
+
         lora_config = LoraConfig(
             r=lora_cfg.r,
             lora_alpha=lora_cfg.lora_alpha,
-            target_modules=lora_cfg.target_modules,
+            target_modules=target_modules,
             lora_dropout=lora_cfg.lora_dropout,
             bias=lora_cfg.bias,
             task_type=TaskType.FEATURE_EXTRACTION,
@@ -211,18 +213,19 @@ def main(cfg: DictConfig):
     )
 
     total_steps = cfg.training.epochs * len(train_loader)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=cfg.training.warmup_steps,
-        num_training_steps=total_steps,
-    )
+    # scheduler = get_cosine_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=cfg.training.warmup_steps,
+    #     num_training_steps=total_steps,
+    # )
+    scheduler=None
 
     for epoch in range(cfg.training.epochs):
         logger.info("Epoch %d/%d", epoch + 1, cfg.training.epochs)
-        train_loss = train_one_epoch(
+        train_one_epoch(
             model, train_loader, optimizer, scheduler, processor, device, cfg, task
         )
-        val_loss, avg_iou, avg_dice = validate(model, val_loader, processor, device, cfg, task)
+        validate(model, val_loader, processor, device, cfg, task)
 
     logger.info("Training complete.")
 
@@ -282,6 +285,16 @@ def main(cfg: DictConfig):
         task.get_logger().report_scalar(
             "test_dice", f"test_dataset_{test_cfg.name}", iteration=0, value=avg_test_dice
         )
+        output_dir = cfg.training.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        # if hasattr(model, "peft_config"):
+        #     if isinstance(model.peft_config, dict):
+        #         model.peft_config["target_modules"] = list(model.peft_config.get("target_modules", []))
+        #     else:
+        #         model.peft_config.target_modules = list(model.peft_config.target_modules)
+        model.save_pretrained(output_dir)
+        processor.save_pretrained(output_dir)
 
 
 if __name__ == "__main__":
