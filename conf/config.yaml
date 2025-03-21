@@ -22,6 +22,7 @@ training:
   size_of_subset: 10
   train_val_split: 0.85
   seed: 228
+  output_dir: "/home/dmatveev/workdir/rosneft_segmentation/models/try_1"
 
 train_data:
   - type: "2D"
@@ -72,19 +73,13 @@ test_data:
       width: 1024
 
 prompt:
-  type: "point"           # "point", "circle", "bbox"
-  num_points: 16
-  circle_mean_diameter: 10 
-  circle_diameter_delta: 2
-  bbox_error: 0
-
-prompt:
-  type: "point"           # "point", "circle", "bbox"
-  num_points: 16
-  circle_mean_diameter: 10 
-  circle_diameter_delta: 2
+  type: "circle"           # "point", "circle", "bbox"
+  num_points: 1
+  num_circles: 1
+  circle_mean_diameter: 20
+  circle_diameter_delta: 1
   bbox_error: 0
 
 clearml:
   project_name: "Rosneft segmentation"
-  task_name: "Experiment 26| select best mask (channel), with 16 points| train on Salt2d, sabamrine | test paleovreses, rifs | 2 epoch, - steps warmup | 4 batch size | multimask_output=False"
+  task_name: "Experiment 30| select best mask (channel), with 16 points| train on Salt2d, sabamrine | test paleovreses, rifs | 2 epoch, - steps warmup | 4 batch size | multimask_output=False"
