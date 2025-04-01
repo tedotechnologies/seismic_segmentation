@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from clearml import Task
 from omegaconf import DictConfig, OmegaConf
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, IA3Config, TaskType, get_peft_model
 from prepare_data import SegmentationDataset, create_combined_dataset
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -27,6 +27,14 @@ from utils import (
     prepare_inputs,
     seed_everything,
     select_best_mask,
+)
+
+from settings import (
+    CLEARML_WEB_HOST,
+    CLEARML_API_HOST,
+    CLEARML_FILES_HOST,
+    CLEARML_API_ACCESS_KEY,
+    CLEARML_API_SECRET_KEY,
 )
 
 logging.basicConfig(
@@ -130,13 +138,11 @@ def main(cfg: DictConfig):
     logger.info(OmegaConf.to_yaml(cfg))
     seed_everything(cfg.training.seed)
 
-    os.environ["CLEARML_WEB_HOST"] = "https://app.clear.ml/"
-    os.environ["CLEARML_API_HOST"] = "https://api.clear.ml"
-    os.environ["CLEARML_FILES_HOST"] = "https://files.clear.ml"
-    os.environ["CLEARML_API_ACCESS_KEY"] = ""
-    os.environ["CLEARML_API_SECRET_KEY"] = (
-        ""
-    )
+    os.environ["CLEARML_WEB_HOST"] = CLEARML_WEB_HOST
+    os.environ["CLEARML_API_HOST"] = CLEARML_API_HOST
+    os.environ["CLEARML_FILES_HOST"] = CLEARML_FILES_HOST
+    os.environ["CLEARML_API_ACCESS_KEY"] = CLEARML_API_ACCESS_KEY
+    os.environ["CLEARML_API_SECRET_KEY"] = CLEARML_API_SECRET_KEY
 
     task = Task.init(project_name=cfg.clearml.project_name, task_name=cfg.clearml.task_name)
     task.connect(OmegaConf.to_container(cfg, resolve=True))
@@ -145,16 +151,23 @@ def main(cfg: DictConfig):
     model = SamModel.from_pretrained(cfg.model.pretrained).to(device)
     processor = SamProcessor.from_pretrained(cfg.model.pretrained)
 
-    if cfg.model.freeze_base:
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.mask_decoder.parameters():
-            param.requires_grad = True
+    # model = torch.compile(model, mode="default")
 
-    if cfg.model.use_lora:
+    if cfg.model.use_ia3:
+        ia3_cfg = cfg.model.ia3_config
+        target_modules = list(ia3_cfg.target_modules)
+        feedforward_modules = list(ia3_cfg.feedforward_modules) if "feedforward_modules" in ia3_cfg else None
+        ia3_config = IA3Config(
+            task_type=TaskType.FEATURE_EXTRACTION,
+            target_modules=target_modules,
+            feedforward_modules=feedforward_modules,
+            fan_in_fan_out=ia3_cfg.fan_in_fan_out,
+            init_ia3_weights=ia3_cfg.init_ia3_weights,
+        )
+        model = get_peft_model(model, ia3_config)
+    elif cfg.model.use_lora:
         lora_cfg = cfg.model.lora_config
         target_modules = list(lora_cfg.target_modules)
-
         lora_config = LoraConfig(
             r=lora_cfg.r,
             lora_alpha=lora_cfg.lora_alpha,
@@ -162,8 +175,17 @@ def main(cfg: DictConfig):
             lora_dropout=lora_cfg.lora_dropout,
             bias=lora_cfg.bias,
             task_type=TaskType.FEATURE_EXTRACTION,
+            # modules_to_save=["mask_decoder", "vision_encoder"],
         )
         model = get_peft_model(model, lora_config)
+
+    if cfg.model.freeze_base:
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in model.mask_decoder.parameters():
+            param.requires_grad = True
+        for param in model.prompt_encoder.parameters():
+            param.requires_grad = True
 
     logger.info(
         "Trainable parameters: %d", sum(p.numel() for p in model.parameters() if p.requires_grad)

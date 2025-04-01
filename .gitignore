@@ -5,3 +5,5 @@
 /__pycache__/
 *.pt
 *.ipynb
+/multirun/*
+.env
