@@ -207,10 +207,71 @@ def pad_prompts(batch_points, batch_labels, pad_point=[0, 0], pad_label=-1):
     return padded_points, padded_labels
 
 
+def generate_point_prompt(label: np.ndarray, cfg=None) -> tuple:
+    """
+    Генерирует промт в виде точек.
+    Возвращает кортеж: (список точек, список меток).
+    """
+    positive_indices = np.argwhere(label == 1)
+    num_points = cfg.get("prompt", {}).get("num_points", 1) if cfg else 1
+    if len(positive_indices) > 0:
+        if len(positive_indices) >= num_points:
+            selected = positive_indices[
+                np.random.choice(len(positive_indices), num_points, replace=False)
+            ]
+        else:
+            selected = positive_indices
+        points = [[int(pt[1]), int(pt[0])] for pt in selected]
+        return points, [1] * len(points)
+    else:
+        return [[0, 0]], [-1]
+
+
+def generate_circle_prompt(label: np.ndarray, cfg=None) -> tuple:
+    """
+    Генерирует промт в виде круга.
+    Для каждого круга выбирается случайная положительная точка (центр),
+    затем генерируются все точки внутри круга с диаметром, варьирующимся вокруг
+    значения circle_mean_diameter с допуском circle_diameter_delta.
+    """
+    h, w = label.shape
+    positive_indices = np.argwhere(label == 1)
+    num_circles = cfg.get("prompt", {}).get("num_circles", 1) if cfg else 1
+    points = []
+    labels_list = []
+    if len(positive_indices) == 0:
+        return [[0, 0]], [-1]
+
+    mean_diameter = cfg.get("prompt", {}).get("circle_mean_diameter", 10)
+    delta = cfg.get("prompt", {}).get("circle_diameter_delta", 2)
+
+    for _ in range(num_circles):
+        idx = random.randint(0, len(positive_indices) - 1)
+        y, x = positive_indices[idx]
+        # Центр круга
+        center_point = [int(x), int(y)]
+        points.append(center_point)
+        labels_list.append(1)
+
+        diameter = random.uniform(mean_diameter - delta, mean_diameter + delta)
+        radius = diameter / 2.0
+
+        for j in range(max(0, int(y - radius)), min(h, int(y + radius) + 1)):
+            for i in range(max(0, int(x - radius)), min(w, int(x + radius) + 1)):
+                if (i - x) ** 2 + (j - y) ** 2 <= radius ** 2:
+                    if i == x and j == y:
+                        continue  # избегаем дублирования центра
+                    points.append([i, j])
+                    labels_list.append(1)
+    return points, labels_list
+
+
 def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
     """
-    Prepares inputs for the model. Depending on the prompt type in cfg,
-    it generates either bounding box prompts or point prompts.
+    Подготавливает входные данные для модели с учётом типа промта.
+    Добавлена поддержка комбинированных промтов:
+      - "bbox+points": одновременно bounding box и точки
+      - "bbox+circles": одновременно bounding box и круги
     """
     prompt_type = cfg.get("prompt", {}).get("type", "point") if cfg is not None else "point"
 
@@ -226,12 +287,41 @@ def prepare_inputs(batch: dict, processor, device: str, cfg=None) -> tuple:
             input_boxes=batch_input_boxes,
             return_tensors="pt",
         )
-    else:
+    elif prompt_type in ["bbox+points", "bbox+circles"]:
+        batch_input_boxes = []
         batch_input_points = []
         batch_input_labels = []
         for lbl in batch["label"]:
             label = torch.tensor(lbl)
-            points, prompt_labels = generate_input_points_and_labels(label.cpu().numpy(), cfg)
+            # Генерация bounding box
+            bbox = generate_bbox_prompt(label.cpu().numpy(), cfg)
+            bbox = [float(coord) for coord in bbox]
+            batch_input_boxes.append([bbox])
+            # Генерация точечного или кругового промта
+            if prompt_type == "bbox+points":
+                points, prompt_labels = generate_point_prompt(label.cpu().numpy(), cfg)
+            else:  # "bbox+circles"
+                points, prompt_labels = generate_circle_prompt(label.cpu().numpy(), cfg)
+            batch_input_points.append(points)
+            batch_input_labels.append(prompt_labels)
+        batch_input_points, batch_input_labels = pad_prompts(batch_input_points, batch_input_labels)
+        inputs = processor(
+            batch["seismic_img"],
+            input_boxes=batch_input_boxes,
+            input_points=batch_input_points,
+            input_labels=batch_input_labels,
+            return_tensors="pt",
+        )
+    else:
+        # Для prompt типов "point" и "circle"
+        batch_input_points = []
+        batch_input_labels = []
+        for lbl in batch["label"]:
+            label = torch.tensor(lbl)
+            if prompt_type == "circle":
+                points, prompt_labels = generate_circle_prompt(label.cpu().numpy(), cfg)
+            else:  # по умолчанию "point"
+                points, prompt_labels = generate_point_prompt(label.cpu().numpy(), cfg)
             batch_input_points.append(points)
             batch_input_labels.append(prompt_labels)
         batch_input_points, batch_input_labels = pad_prompts(batch_input_points, batch_input_labels)
