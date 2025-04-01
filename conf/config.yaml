@@ -1,7 +1,12 @@
+defaults:
+  - _self_
+  - experiments: base 
+
 model:
   pretrained: "facebook/sam-vit-huge"
   use_lora: true
-  freeze_base: false
+  use_ia3: true             # if true, use ia3 even if lora true
+  freeze_base: true
   lora_config:
     r: 32
     lora_alpha: 32
@@ -9,6 +14,12 @@ model:
     lora_dropout: 0.1
     bias: "none"
     task_type: "FEATURE_EXTRACTION"
+  ia3_config:
+    target_modules: ["q_proj", "k_proj", "v_proj", "out_proj"]
+    feedforward_modules: []  
+    fan_in_fan_out: false
+    init_ia3_weights: true
+    task_type: "FEATURE_EXTRACTION"  
 
 training:
   epochs: 1
@@ -19,10 +30,10 @@ training:
   log_interval: 10
   use_mask: true
   use_subset: false
-  size_of_subset: 10
+  size_of_subset: 1
   train_val_split: 0.85
   seed: 228
-  output_dir: "/home/dmatveev/workdir/rosneft_segmentation/models/try_1"
+  output_dir: "/home/dmatveev/workdir/rosneft_segmentation/models/try_5_box"
 
 train_data:
   - type: "2D"
@@ -73,13 +84,13 @@ test_data:
       width: 1024
 
 prompt:
-  type: "circle"           # "point", "circle", "bbox"
-  num_points: 1
-  num_circles: 1
-  circle_mean_diameter: 20
+  type: "bbox+points"           # "point", "circle", "bbox", "bbox+points"  # или "bbox+circles"
+  num_points: 16
+  num_circles: 5
+  circle_mean_diameter: 5
   circle_diameter_delta: 1
   bbox_error: 0
 
 clearml:
   project_name: "Rosneft segmentation"
-  task_name: "Experiment 30| select best mask (channel), with 16 points| train on Salt2d, sabamrine | test paleovreses, rifs | 2 epoch, - steps warmup | 4 batch size | multimask_output=False"
+  task_name: "Experiment 40|unfreeze encoder select best mask (channel), with 16 points| train on Salt2d, sabamrine | test paleovreses, rifs | 2 epoch, - steps warmup | 4 batch size | multimask_output=False"

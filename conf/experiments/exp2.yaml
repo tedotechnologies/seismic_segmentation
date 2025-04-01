@@ -1,0 +1,18 @@
+# @package _global_
+
+
+training:
+  output_dir: "/home/dmatveev/workdir/rosneft_segmentation/models/exp5"
+  epochs: 1
+  use_subset: false
+
+prompt:
+  type: "bbox+circles"           # "point", "circle", "bbox", "bbox+points"  # или "bbox+circles"
+  num_circles: 5
+  circle_mean_diameter: 16
+  circle_diameter_delta: 1
+  bbox_error: 0
+
+clearml:
+  task_name: "EXP2:  bbox+circles IA3"
+
