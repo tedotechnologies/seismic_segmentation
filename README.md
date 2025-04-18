@@ -38,7 +38,6 @@ Implements:
 
 ---
 
-## 🧰 Installation
 
 ## 🧰 Installation
 
