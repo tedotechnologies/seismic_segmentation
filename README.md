@@ -2,6 +2,8 @@
 
 This repository implements a segmentation approach for seismic images based on the methods described in the referenced article. The project fine-tunes the Segment Anything Model (SAM) for automatic segmentation of seismic features (e.g., paleovres, reefs) using an IA3 adapter and combined prompt strategies (bounding box + points). The approach has demonstrated improvements in segmentation metrics (Dice up to 0.60, IoU improvement) and processing speed (≈1.35 FPS), making it viable for industrial applications.
 
+[Original paper](https://arxiv.org/pdf/2409.04962)
+
 ---
 
 ## 🔑 Key Features
