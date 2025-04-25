@@ -145,5 +145,16 @@ run_train.sh    # Shell script to initiate training
 - **Usage:** Modify configs to fit your datasets and experiments  
 
 ---
+## 🤝 Acknowledgements
+
+This work was carried out in close collaboration with the Rosneft team at KrasnoyarskNIPIneft, who generously provided seismic datasets and theoretical guidance. We are especially grateful to:
+
+- **petrovdenees** 
+- **vladimir6567**  
+- **bc-ru**
+- **unlikexd**
+- **andreyvostretsov**
+
+Their expertise and hands-on help were instrumental in achieving the reported segmentation performance.  
 
 For more details or assistance, please refer to the documentation in the repository or contact the project maintainer.
